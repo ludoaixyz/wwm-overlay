@@ -93,6 +93,9 @@ INTOX_MIN_GAP_SECONDS = 28.0
 INTOX_OVERLAY_COOLDOWN_SECONDS = 29.0
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
+# --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
+SOULSHADE_TEMPLATE_PATH = "soulshadebuff.png"
+
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
 
@@ -100,15 +103,31 @@ TH_CORR, TH_SQDIFF, TH_MAD, TH_EDGE_IOU = 0.82, 0.18, 0.12, 0.45
 TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU = 0.70, 0.30, 0.20, 0.30
 ROI_PAD_X, ROI_PAD_Y, MIN_MASK_PIXELS = 10, 10, 80
 
+BUFF_DEFS = {
+    "intoxicated": {
+        "template": DETECT_ICON_TEMPLATE_PATH,
+        "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
+        "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
+        "has_activation": True,
+    },
+    "soulshade": {
+        "template": SOULSHADE_TEMPLATE_PATH,
+        "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
+        "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
+        "has_activation": False,
+    },
+}
+
 # --- Unified Animated Overlay Elements ---
 ENABLE_READY_OVERLAY = True
 OVERLAY_BLACK_THRESH = 8
 OVERLAY_ALPHA_SCALE = 1.0
 
 ANIMATED_OVERLAYS = {
-    "cloud": {"path": "abilitymaskbooleanCloud.gif", "x": 1590 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 0.8},
-    "umbrella": {"path": "abilitymaskbooleanUmbrella.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 0.7},
-    "intoxicated": {"path": "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0}
+    "cloud": {"path": "abilitymaskbooleanCloud.gif", "x": 1590 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "umbrella": {"path": "abilitymaskbooleanUmbrella.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "intoxicated": {"path": "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "soulshade": {"path": "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
 
 
@@ -118,10 +137,10 @@ ANIMATED_OVERLAYS = {
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.intox_buff_present = False
         self.intox_overlay_block_until = 0.0
         self.intox_sound_play_at = None
-        self.intox_last_seen_time = 0.0
+        self.buff_present = {}
+        self.buff_last_seen_time = {}
 
 global_state = SharedState()
 
@@ -569,45 +588,68 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
             time.sleep(SAMPLE_INTERVAL)
 
 
-def intoxicated_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_gray, tpl_edges, tpl_mask, sound):
+def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, intox_sound):
+    """
+    Detect buff icons inside the shared ROI and update global_state.buff_present.
+
+    Intoxicated retains strict activation behavior:
+      - strict-threshold activation
+      - delayed sound playback
+      - temporary overlay blocking
+
+    Soulshade is presence/absence only and does not schedule activation events.
+    """
     last_activation_time = 0.0
     stable_hits = 0
-    
+
     with mss() as sct:
         while not stop_evt.is_set():
             now = time.time()
-            
+
             if (foreground_process_name() or "").lower() != TARGET_EXE.lower() and not BYPASS_FOCUS:
                 stable_hits = 0
                 time.sleep(0.05)
                 continue
 
-            # Buff ROI sample + metrics
             shot = np.array(sct.grab(roi_monitor), dtype=np.uint8)
-            ok, corr, sq, mad, eiou = masked_metrics(shot[:, :, :3], tpl_gray, tpl_edges, tpl_mask)
+            roi_bgr = shot[:, :, :3]
 
-            presence_ok = (corr >= TH_PRES_CORR) and (sq <= TH_PRES_SQDIFF) and (mad <= TH_PRES_MAD) and (eiou >= TH_PRES_EDGE_IOU)
+            intox_ok = False
 
-            with global_state.lock:
-                if presence_ok:
-                    global_state.intox_last_seen_time = now
-                global_state.intox_buff_present = (now - global_state.intox_last_seen_time) <= INTOX_BUFF_LOST_GRACE_SECONDS
+            for buff_key, cfg in BUFF_DEFS.items():
+                tpl_gray, tpl_edges, tpl_mask = tpl_cache[buff_key]
+                ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
 
-            # Strict Activation Logic
-            stable_hits = stable_hits + 1 if ok else 0
+                pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
+                presence_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+
+                with global_state.lock:
+                    if presence_ok:
+                        global_state.buff_last_seen_time[buff_key] = now
+                    last_seen = float(global_state.buff_last_seen_time.get(buff_key, 0.0))
+                    global_state.buff_present[buff_key] = (now - last_seen) <= float(cfg["lost_grace"])
+
+                if buff_key == "intoxicated":
+                    intox_ok = ok
+
+            stable_hits = stable_hits + 1 if intox_ok else 0
             if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
                 last_activation_time = now
                 stable_hits = 0
                 with global_state.lock:
                     global_state.intox_sound_play_at = now + INTOX_SOUND_DELAY_SECONDS
-                    global_state.intox_overlay_block_until = max(global_state.intox_overlay_block_until, now + INTOX_OVERLAY_COOLDOWN_SECONDS)
+                    global_state.intox_overlay_block_until = max(
+                        global_state.intox_overlay_block_until,
+                        now + INTOX_OVERLAY_COOLDOWN_SECONDS,
+                    )
 
-            # Delayed Sound Playback
-            with global_state.lock: play_at = global_state.intox_sound_play_at
+            with global_state.lock:
+                play_at = global_state.intox_sound_play_at
             if play_at and now >= play_at:
                 if (foreground_process_name() or "").lower() == TARGET_EXE.lower():
-                    sound.play()
-                    with global_state.lock: global_state.intox_sound_play_at = None
+                    intox_sound.play()
+                    with global_state.lock:
+                        global_state.intox_sound_play_at = None
 
             time.sleep(INTOX_CHECK_INTERVAL_SEC)
 
@@ -636,10 +678,14 @@ def main():
     grab_bool1, bool1_red_rel_mask = build_masked_sampler(maskBool1, padding=BOOL1_PADDING)
     grab_bool2, bool2_patch_masks = build_multi_patch_sampler(maskBool2, padding=BOOL2_PADDING)
 
-    # Initialize Intoxicated Logic
-    tpl_gray, tpl_edges, tpl_mask = load_template(str(BASE_DIR / DETECT_ICON_TEMPLATE_PATH))
+    # Initialize Buff Logic (shared ROI)
     x0, y0, x1, y1 = find_red_roi_from_bg(str(BASE_DIR / BG_ROI_GUIDE_PATH))
     roi_monitor = {"left": x0, "top": y0, "width": (x1 - x0), "height": (y1 - y0)}
+
+    tpl_cache = {}
+    for buff_key, cfg in BUFF_DEFS.items():
+        tpl_cache[buff_key] = load_template(str(BASE_DIR / cfg["template"]))
+
     intox_sound = pygame.mixer.Sound(str(BASE_DIR / INTOX_SOUND_PATH))
 
     # Setup UI Controller
@@ -653,7 +699,7 @@ def main():
     threading.Thread(target=_space_keyboard_hook_loop, args=(stop_evt,), daemon=True).start()
     threading.Thread(target=icon_capture_loop, args=(overlay, stop_evt), daemon=True).start()
     threading.Thread(target=cooldown_detector_loop, args=(overlay, stop_evt), daemon=True).start()
-    threading.Thread(target=intoxicated_detector_loop, args=(stop_evt, roi_monitor, tpl_gray, tpl_edges, tpl_mask, intox_sound), daemon=True).start()
+    threading.Thread(target=buff_detector_loop, args=(stop_evt, roi_monitor, tpl_cache, intox_sound), daemon=True).start()
 
     true_streak, false_streak, force_hide_until, was_focused = 0, 0, 0.0, False
 
@@ -675,7 +721,8 @@ def main():
             was_focused = focus_ok
             overlay.post_set_force_hide(True)
             overlay.post_set_icons_visible(False)
-            overlay.post_set_gif_state("intoxicated", active=False)
+            for _gif_key in list(overlay.gif_cache.keys()):
+                overlay.post_set_gif_state(_gif_key, active=False)
             true_streak = false_streak = 0
             return
 
@@ -705,13 +752,17 @@ def main():
             overlay.post_set_force_hide(False)
             overlay.post_set_icons_visible(True)
 
-        # 3. Apply Intoxicated Specific Logic
+        # 3. Apply Buff-driven Overlay Logic
         with global_state.lock:
-            buff_present = global_state.intox_buff_present
-            block_until = global_state.intox_overlay_block_until
-        
-        should_show_drunk = gate_on and not buff_present and (now >= block_until)
+            intox_present = bool(global_state.buff_present.get("intoxicated", False))
+            soulshade_present = bool(global_state.buff_present.get("soulshade", False))
+            block_until = float(global_state.intox_overlay_block_until)
+
+        should_show_drunk = gate_on and (not intox_present) and (now >= block_until)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
+
+        should_show_soulshade = gate_on and (not soulshade_present)
+        overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
 
     timer = overlay.QtCore.QTimer()
     timer.timeout.connect(master_tick)

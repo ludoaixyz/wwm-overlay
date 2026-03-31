@@ -1,0 +1,14 @@
+# Claude local settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
