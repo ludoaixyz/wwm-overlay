@@ -165,6 +165,8 @@ class SharedState:
         self.intox_sound_play_at = None
         self.buff_present = {}
         self.buff_last_seen_time = {}
+        self.buff_template_present = {}
+        self.buff_template_last_seen_time = {}
 
 global_state = SharedState()
 
@@ -714,17 +716,24 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
 
             for buff_key, cfg in BUFF_DEFS.items():
                 template_metrics = []
-                for tpl_gray, tpl_edges, tpl_mask in tpl_cache[buff_key]:
+                for tpl_idx, (tpl_gray, tpl_edges, tpl_mask) in enumerate(tpl_cache[buff_key]):
                     ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
                     template_metrics.append((ok, corr, sq, mad, eiou))
-
-                pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
-                presence_ok = any(
-                    (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
-                    for _, corr, sq, mad, eiou in template_metrics
-                )
+                    template_key = (buff_key, tpl_idx)
+                    pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
+                    template_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                    with global_state.lock:
+                        if template_ok:
+                            global_state.buff_template_last_seen_time[template_key] = now
+                        tpl_last_seen = float(global_state.buff_template_last_seen_time.get(template_key, 0.0))
+                        tpl_present = (now - tpl_last_seen) <= float(cfg["lost_grace"])
+                        global_state.buff_template_present[template_key] = tpl_present
 
                 with global_state.lock:
+                    presence_ok = any(
+                        bool(global_state.buff_template_present.get((buff_key, tpl_idx), False))
+                        for tpl_idx in range(len(tpl_cache[buff_key]))
+                    )
                     if presence_ok:
                         global_state.buff_last_seen_time[buff_key] = now
                     last_seen = float(global_state.buff_last_seen_time.get(buff_key, 0.0))
@@ -865,14 +874,16 @@ def main():
 
         # 3. Apply Buff-driven Overlay Logic
         with global_state.lock:
-            intox_present = bool(global_state.buff_present.get("intoxicated", False))
-            soulshade_present = bool(global_state.buff_present.get("soulshade", False))
+            intox_1_present = bool(global_state.buff_template_present.get(("intoxicated", 0), False))
+            intox_2_present = bool(global_state.buff_template_present.get(("intoxicated", 1), False))
+            soulshade_1_present = bool(global_state.buff_template_present.get(("soulshade", 0), False))
+            soulshade_2_present = bool(global_state.buff_template_present.get(("soulshade", 1), False))
             block_until = float(global_state.intox_overlay_block_until)
 
-        should_show_drunk = gate_on and (not intox_present) and (now >= block_until)
+        should_show_drunk = gate_on and (not intox_1_present) and (not intox_2_present) and (now >= block_until)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
-        should_show_soulshade = gate_on and (not soulshade_present)
+        should_show_soulshade = gate_on and (not soulshade_1_present) and (not soulshade_2_present)
         overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
 
     timer = overlay.QtCore.QTimer()
