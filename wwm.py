@@ -81,6 +81,8 @@ ABILITIES = {
         "cooldown": 19.2,
         "lockout": 18.0,
         "sound": AUDIO_DIR / "cloud.mp3",
+        "pixel_tol": 12,
+        "min_masks_required": 2,
         "used_masks": [
             ABILITY_MASKS_DIR / "abilitymaskboolean1a.png",
             ABILITY_MASKS_DIR / "abilitymaskboolean1b.png",
@@ -392,8 +394,10 @@ class PixelMask:
         return True
 
 class MultiMaskDetector:
-    def __init__(self, mask_files, pixel_tol=MASK_PIXEL_TOL):
+    def __init__(self, mask_files, pixel_tol=MASK_PIXEL_TOL, min_masks_required=None):
         self.masks = [PixelMask(p, pixel_tol=pixel_tol) for p in mask_files]
+        self.min_masks_required = int(min_masks_required) if min_masks_required is not None else len(self.masks)
+        self.min_masks_required = max(1, min(self.min_masks_required, len(self.masks)))
         self.streak = 0
         self.was_triggered = False
 
@@ -401,7 +405,23 @@ class MultiMaskDetector:
         for pm in self.masks: pm.prepare_for_screen(screen_w, screen_h)
 
     def step(self, sct) -> bool:
-        ok = all(pm.matches(np.array(sct.grab({"left": pm.screen_bbox[0], "top": pm.screen_bbox[1], "width": pm.screen_bbox[2] - pm.screen_bbox[0], "height": pm.screen_bbox[3] - pm.screen_bbox[1]}), dtype=np.uint8)[:, :, :3]) for pm in self.masks)
+        matched = 0
+        for pm in self.masks:
+            roi = np.array(
+                sct.grab(
+                    {
+                        "left": pm.screen_bbox[0],
+                        "top": pm.screen_bbox[1],
+                        "width": pm.screen_bbox[2] - pm.screen_bbox[0],
+                        "height": pm.screen_bbox[3] - pm.screen_bbox[1],
+                    }
+                ),
+                dtype=np.uint8,
+            )[:, :, :3]
+            if pm.matches(roi):
+                matched += 1
+
+        ok = matched >= self.min_masks_required
         self.streak = (self.streak + 1) if ok else 0
         fired = (self.streak >= MASK_CONFIRM_FRAMES) and not self.was_triggered
         self.was_triggered = (self.streak >= MASK_CONFIRM_FRAMES)
@@ -568,7 +588,14 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
         sound_path = str(cfg["sound"])
         cfg["sound_obj"] = pygame.mixer.Sound(sound_path) if os.path.exists(sound_path) else None
 
-    detectors = {k: MultiMaskDetector([str(mf) for mf in cfg.get("used_masks", [])]) for k, cfg in ABILITIES.items()}
+    detectors = {
+        k: MultiMaskDetector(
+            [str(mf) for mf in cfg.get("used_masks", [])],
+            pixel_tol=int(cfg.get("pixel_tol", MASK_PIXEL_TOL)),
+            min_masks_required=cfg.get("min_masks_required"),
+        )
+        for k, cfg in ABILITIES.items()
+    }
     state = {k: {"cooldown_end": None, "last_trigger_time": 0.0} for k in ABILITIES.keys()}
 
     with mss() as sct:
