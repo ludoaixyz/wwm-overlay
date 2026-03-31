@@ -23,6 +23,14 @@ import pygame
 # ============================================================
 SCRIPT_VERSION = "2026-02-26.Master.Unified"
 BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
+MASKS_DIR = ASSETS_DIR / "masks"
+ICON_MASKS_DIR = MASKS_DIR / "icons"
+GATE_MASKS_DIR = MASKS_DIR / "gates"
+ABILITY_MASKS_DIR = MASKS_DIR / "abilities"
+BUFF_MASKS_DIR = MASKS_DIR / "buffs"
+AUDIO_DIR = ASSETS_DIR / "audio"
+GIFS_DIR = ASSETS_DIR / "gifs"
 
 TARGET_EXE = "wwm.exe"
 BYPASS_FOCUS = False
@@ -72,21 +80,25 @@ ABILITIES = {
     "cloud": {
         "cooldown": 19.2,
         "lockout": 18.0,
-        "sound": "cloud.mp3",
-        "used_masks": ["abilitymaskboolean1a.png", "abilitymaskboolean1b.png", "abilitymaskboolean1c.png"],
+        "sound": AUDIO_DIR / "cloud.mp3",
+        "used_masks": [
+            ABILITY_MASKS_DIR / "abilitymaskboolean1a.png",
+            ABILITY_MASKS_DIR / "abilitymaskboolean1b.png",
+            ABILITY_MASKS_DIR / "abilitymaskboolean1c.png",
+        ],
     },
     "umbrella": {
         "cooldown": 28.9,
         "lockout": 28.0,
-        "sound": "umbrella.mp3",
-        "used_masks": ["abilitymaskboolean2a.png"],
+        "sound": AUDIO_DIR / "umbrella.mp3",
+        "used_masks": [ABILITY_MASKS_DIR / "abilitymaskboolean2a.png"],
     },
 }
 
 # --- Intoxicated Buff Configuration ---
-DETECT_ICON_TEMPLATE_PATH = "intoxicatedbuff.png"
-BG_ROI_GUIDE_PATH = "intoxicatedbg.png"
-INTOX_SOUND_PATH = "intoxicated.mp3"
+DETECT_ICON_TEMPLATE_PATH = BUFF_MASKS_DIR / "intoxicatedbuff.png"
+BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
+INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 
 INTOX_SOUND_DELAY_SECONDS = 26.3
 INTOX_MIN_GAP_SECONDS = 28.0
@@ -94,7 +106,7 @@ INTOX_OVERLAY_COOLDOWN_SECONDS = 29.0
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
-SOULSHADE_TEMPLATE_PATH = "soulshadebuff.png"
+SOULSHADE_TEMPLATE_PATH = BUFF_MASKS_DIR / "soulshadebuff.png"
 
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
@@ -124,10 +136,10 @@ OVERLAY_BLACK_THRESH = 8
 OVERLAY_ALPHA_SCALE = 1.0
 
 ANIMATED_OVERLAYS = {
-    "cloud": {"path": "abilitymaskbooleanCloud.gif", "x": 1590 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
-    "umbrella": {"path": "abilitymaskbooleanUmbrella.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
-    "intoxicated": {"path": "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
-    "soulshade": {"path": "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "cloud": {"path": GIFS_DIR / "abilitymaskbooleanCloud.gif", "x": 1590 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "umbrella": {"path": GIFS_DIR / "abilitymaskbooleanUmbrella.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "intoxicated": {"path": GIFS_DIR / "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
 
 
@@ -415,7 +427,7 @@ class UnifiedOverlayController:
 
         # Initialize all animated GIFs (Cooldowns + Intoxicated)
         for key, config in ANIMATED_OVERLAYS.items():
-            path = str(BASE_DIR / config["path"])
+            path = str(config["path"])
             if os.path.exists(path):
                 movie = QtGui.QMovie(path)
                 movie.setScaledSize(QtCore.QSize(int(config["w"]), int(config["h"])))
@@ -553,10 +565,10 @@ def icon_capture_loop(overlay: UnifiedOverlayController, stop_evt: threading.Eve
 
 def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threading.Event):
     for cfg in ABILITIES.values():
-        sound_path = str(BASE_DIR / cfg["sound"])
+        sound_path = str(cfg["sound"])
         cfg["sound_obj"] = pygame.mixer.Sound(sound_path) if os.path.exists(sound_path) else None
 
-    detectors = {k: MultiMaskDetector([str(BASE_DIR / mf) for mf in cfg.get("used_masks", [])]) for k, cfg in ABILITIES.items()}
+    detectors = {k: MultiMaskDetector([str(mf) for mf in cfg.get("used_masks", [])]) for k, cfg in ABILITIES.items()}
     state = {k: {"cooldown_end": None, "last_trigger_time": 0.0} for k in ABILITIES.keys()}
 
     with mss() as sct:
@@ -663,7 +675,16 @@ def main():
     except: pass
 
     # Initialize Base Icon Params
-    pairs = [(a, BASE_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png", int(re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1))) for a in BASE_DIR.glob("mask*a.png") if re.match(r"mask(\d+)a\.png$", a.name.lower()) and (BASE_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png").exists()]
+    pairs = [
+        (
+            a,
+            ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png",
+            int(re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)),
+        )
+        for a in ICON_MASKS_DIR.glob("mask*a.png")
+        if re.match(r"mask(\d+)a\.png$", a.name.lower())
+        and (ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png").exists()
+    ]
     pairs.sort(key=lambda t: t[2])
 
     icon_params = []
@@ -674,19 +695,20 @@ def main():
         icon_params.append({"src_rect": (sx, sy, sw-sx, sh-sy), "dst_rect": (dx, dy, dw-dx, dh-dy), "alpha": alpha_from_red_crop(mB.crop((dx, dy, dw, dh))), "_qimg": None})
 
     # Initialize Global Gates
-    maskBool1, maskBool2 = Image.open(BASE_DIR / "maskboolean.png").convert("RGBA"), Image.open(BASE_DIR / "maskboolean2.png").convert("RGBA")
+    maskBool1 = Image.open(GATE_MASKS_DIR / "maskboolean.png").convert("RGBA")
+    maskBool2 = Image.open(GATE_MASKS_DIR / "maskboolean2.png").convert("RGBA")
     grab_bool1, bool1_red_rel_mask = build_masked_sampler(maskBool1, padding=BOOL1_PADDING)
     grab_bool2, bool2_patch_masks = build_multi_patch_sampler(maskBool2, padding=BOOL2_PADDING)
 
     # Initialize Buff Logic (shared ROI)
-    x0, y0, x1, y1 = find_red_roi_from_bg(str(BASE_DIR / BG_ROI_GUIDE_PATH))
+    x0, y0, x1, y1 = find_red_roi_from_bg(str(BG_ROI_GUIDE_PATH))
     roi_monitor = {"left": x0, "top": y0, "width": (x1 - x0), "height": (y1 - y0)}
 
     tpl_cache = {}
     for buff_key, cfg in BUFF_DEFS.items():
-        tpl_cache[buff_key] = load_template(str(BASE_DIR / cfg["template"]))
+        tpl_cache[buff_key] = load_template(str(cfg["template"]))
 
-    intox_sound = pygame.mixer.Sound(str(BASE_DIR / INTOX_SOUND_PATH))
+    intox_sound = pygame.mixer.Sound(str(INTOX_SOUND_PATH))
 
     # Setup UI Controller
     with mss() as sct: sw, sh = int(sct.monitors[1]["width"]), int(sct.monitors[1]["height"])
