@@ -102,7 +102,10 @@ ABILITIES = {
 }
 
 # --- Intoxicated Buff Configuration ---
-DETECT_ICON_TEMPLATE_PATH = BUFF_MASKS_DIR / "intoxicatedbuff.png"
+DETECT_ICON_TEMPLATE_PATHS = [
+    BUFF_MASKS_DIR / "intoxicatedbuff1.png",
+    BUFF_MASKS_DIR / "intoxicatedbuff2.png",
+]
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 
@@ -112,7 +115,10 @@ INTOX_OVERLAY_COOLDOWN_SECONDS = 29.0
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
-SOULSHADE_TEMPLATE_PATH = BUFF_MASKS_DIR / "soulshadebuff.png"
+SOULSHADE_TEMPLATE_PATHS = [
+    BUFF_MASKS_DIR / "soulshadebuff1.png",
+    BUFF_MASKS_DIR / "soulshadebuff2.png",
+]
 
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
@@ -123,13 +129,13 @@ ROI_PAD_X, ROI_PAD_Y, MIN_MASK_PIXELS = 10, 10, 80
 
 BUFF_DEFS = {
     "intoxicated": {
-        "template": DETECT_ICON_TEMPLATE_PATH,
+        "templates": DETECT_ICON_TEMPLATE_PATHS,
         "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
         "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
         "has_activation": True,
     },
     "soulshade": {
-        "template": SOULSHADE_TEMPLATE_PATH,
+        "templates": SOULSHADE_TEMPLATE_PATHS,
         "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
         "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
         "has_activation": False,
@@ -707,11 +713,16 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
             intox_ok = False
 
             for buff_key, cfg in BUFF_DEFS.items():
-                tpl_gray, tpl_edges, tpl_mask = tpl_cache[buff_key]
-                ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
+                template_metrics = []
+                for tpl_gray, tpl_edges, tpl_mask in tpl_cache[buff_key]:
+                    ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
+                    template_metrics.append((ok, corr, sq, mad, eiou))
 
                 pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
-                presence_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                presence_ok = any(
+                    (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                    for _, corr, sq, mad, eiou in template_metrics
+                )
 
                 with global_state.lock:
                     if presence_ok:
@@ -720,7 +731,7 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     global_state.buff_present[buff_key] = (now - last_seen) <= float(cfg["lost_grace"])
 
                 if buff_key == "intoxicated":
-                    intox_ok = ok
+                    intox_ok = any(ok for ok, _, _, _, _ in template_metrics)
 
             stable_hits = stable_hits + 1 if intox_ok else 0
             if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
@@ -784,7 +795,7 @@ def main():
 
     tpl_cache = {}
     for buff_key, cfg in BUFF_DEFS.items():
-        tpl_cache[buff_key] = load_template(str(cfg["template"]))
+        tpl_cache[buff_key] = [load_template(str(template_path)) for template_path in cfg["templates"]]
 
     intox_sound = pygame.mixer.Sound(str(INTOX_SOUND_PATH))
 
