@@ -5,6 +5,7 @@ import time
 import threading
 import queue
 import ctypes
+from collections import deque
 from ctypes import wintypes
 from pathlib import Path
 
@@ -83,6 +84,9 @@ ABILITIES = {
         "sound": AUDIO_DIR / "cloud.mp3",
         "pixel_tol": 12,
         "min_masks_required": 2,
+        "infer_window_frames": 45,
+        "infer_min_distinct_masks": 2,
+        "infer_min_total_hits": 12,
         "used_masks": [
             ABILITY_MASKS_DIR / "abilitymaskboolean1a.png",
             ABILITY_MASKS_DIR / "abilitymaskboolean1b.png",
@@ -394,18 +398,42 @@ class PixelMask:
         return True
 
 class MultiMaskDetector:
-    def __init__(self, mask_files, pixel_tol=MASK_PIXEL_TOL, min_masks_required=None):
+    def __init__(
+        self,
+        mask_files,
+        pixel_tol=MASK_PIXEL_TOL,
+        min_masks_required=None,
+        infer_window_frames=0,
+        infer_min_distinct_masks=None,
+        infer_min_total_hits=0,
+    ):
         self.masks = [PixelMask(p, pixel_tol=pixel_tol) for p in mask_files]
         self.min_masks_required = int(min_masks_required) if min_masks_required is not None else len(self.masks)
         self.min_masks_required = max(1, min(self.min_masks_required, len(self.masks)))
         self.streak = 0
         self.was_triggered = False
+        self.infer_window_frames = max(0, int(infer_window_frames or 0))
+        self.infer_min_distinct_masks = (
+            int(infer_min_distinct_masks)
+            if infer_min_distinct_masks is not None
+            else self.min_masks_required
+        )
+        self.infer_min_distinct_masks = max(1, min(self.infer_min_distinct_masks, len(self.masks)))
+        self.infer_min_total_hits = max(0, int(infer_min_total_hits or 0))
+        self.hit_history = deque(maxlen=self.infer_window_frames) if self.infer_window_frames > 0 else None
 
     def prepare(self, screen_w: int, screen_h: int):
         for pm in self.masks: pm.prepare_for_screen(screen_w, screen_h)
 
+    def reset(self):
+        self.streak = 0
+        self.was_triggered = False
+        if self.hit_history is not None:
+            self.hit_history.clear()
+
     def step(self, sct) -> bool:
         matched = 0
+        frame_hits = []
         for pm in self.masks:
             roi = np.array(
                 sct.grab(
@@ -420,11 +448,29 @@ class MultiMaskDetector:
             )[:, :, :3]
             if pm.matches(roi):
                 matched += 1
+                frame_hits.append(1)
+            else:
+                frame_hits.append(0)
 
         ok = matched >= self.min_masks_required
         self.streak = (self.streak + 1) if ok else 0
-        fired = (self.streak >= MASK_CONFIRM_FRAMES) and not self.was_triggered
-        self.was_triggered = (self.streak >= MASK_CONFIRM_FRAMES)
+        strict_confirmed = (self.streak >= MASK_CONFIRM_FRAMES)
+
+        infer_confirmed = False
+        if self.hit_history is not None:
+            self.hit_history.append(frame_hits)
+            history = np.array(self.hit_history, dtype=np.uint8)
+            if history.size > 0:
+                distinct_seen = int(np.sum(history.sum(axis=0) > 0))
+                total_hits = int(history.sum())
+                infer_confirmed = (
+                    distinct_seen >= self.infer_min_distinct_masks
+                    and total_hits >= self.infer_min_total_hits
+                )
+
+        confirmed = strict_confirmed or infer_confirmed
+        fired = confirmed and not self.was_triggered
+        self.was_triggered = confirmed
         return fired
 
 # ============================================================
@@ -593,6 +639,9 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
             [str(mf) for mf in cfg.get("used_masks", [])],
             pixel_tol=int(cfg.get("pixel_tol", MASK_PIXEL_TOL)),
             min_masks_required=cfg.get("min_masks_required"),
+            infer_window_frames=cfg.get("infer_window_frames", 0),
+            infer_min_distinct_masks=cfg.get("infer_min_distinct_masks"),
+            infer_min_total_hits=cfg.get("infer_min_total_hits", 0),
         )
         for k, cfg in ABILITIES.items()
     }
@@ -614,10 +663,12 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     if detectors[key].step(sct):
                         st["last_trigger_time"] = now
                         st["cooldown_end"] = now + float(cfg["cooldown"])
+                        detectors[key].reset()
                         overlay.post_set_gif_state(key, active=False)
                 
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
+                    detectors[key].reset()
                     if cfg.get("sound_obj"): 
                         try: cfg["sound_obj"].play()
                         except: pass
