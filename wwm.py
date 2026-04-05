@@ -35,6 +35,7 @@ GIFS_DIR = ASSETS_DIR / "gifs"
 
 TARGET_EXE = "wwm.exe"
 BYPASS_FOCUS = False
+HIDE_WHEN_UNFOCUSED = False
 DEBUG = True
 
 # --- Global Timers & Rates ---
@@ -853,7 +854,8 @@ def main():
         force_hide_active = now < force_hide_until
         focus_ok = True if BYPASS_FOCUS else ((foreground_process_name() or "").lower() == TARGET_EXE.lower())
 
-        if not focus_ok or force_hide_active:
+        should_hide_for_focus = (not focus_ok) and HIDE_WHEN_UNFOCUSED
+        if should_hide_for_focus or force_hide_active:
             was_focused = focus_ok
             overlay.post_set_force_hide(True)
             overlay.post_set_icons_visible(False)
