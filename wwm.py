@@ -103,8 +103,10 @@ ABILITIES = {
 
 # --- Intoxicated Buff Configuration ---
 DETECT_ICON_TEMPLATE_PATHS = [
-    BUFF_MASKS_DIR / "intoxicatedbuff1.png",
-    BUFF_MASKS_DIR / "intoxicatedbuff2.png",
+    BUFF_MASKS_DIR / "intoxicatedbuff1a.png",
+    BUFF_MASKS_DIR / "intoxicatedbuff1b.png",
+    BUFF_MASKS_DIR / "intoxicatedbuff2a.png",
+    BUFF_MASKS_DIR / "intoxicatedbuff2b.png",
 ]
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
@@ -116,8 +118,10 @@ INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
 SOULSHADE_TEMPLATE_PATHS = [
-    BUFF_MASKS_DIR / "soulshadebuff1.png",
-    BUFF_MASKS_DIR / "soulshadebuff2.png",
+    BUFF_MASKS_DIR / "soulshadebuff1a.png",
+    BUFF_MASKS_DIR / "soulshadebuff1b.png",
+    BUFF_MASKS_DIR / "soulshadebuff2a.png",
+    BUFF_MASKS_DIR / "soulshadebuff2b.png",
 ]
 
 STABLE_FRAMES_REQUIRED = 2
@@ -874,16 +878,14 @@ def main():
 
         # 3. Apply Buff-driven Overlay Logic
         with global_state.lock:
-            intox_1_present = bool(global_state.buff_template_present.get(("intoxicated", 0), False))
-            intox_2_present = bool(global_state.buff_template_present.get(("intoxicated", 1), False))
-            soulshade_1_present = bool(global_state.buff_template_present.get(("soulshade", 0), False))
-            soulshade_2_present = bool(global_state.buff_template_present.get(("soulshade", 1), False))
+            intoxicated_present = bool(global_state.buff_present.get("intoxicated", False))
+            soulshade_present = bool(global_state.buff_present.get("soulshade", False))
             block_until = float(global_state.intox_overlay_block_until)
 
-        should_show_drunk = gate_on and (not intox_1_present) and (not intox_2_present) and (now >= block_until)
+        should_show_drunk = gate_on and (not intoxicated_present) and (now >= block_until)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
-        should_show_soulshade = gate_on and (not soulshade_1_present) and (not soulshade_2_present)
+        should_show_soulshade = gate_on and (not soulshade_present)
         overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
 
     timer = overlay.QtCore.QTimer()
