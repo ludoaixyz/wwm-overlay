@@ -789,16 +789,25 @@ def main():
     except: pass
 
     # Initialize Base Icon Params
-    pairs = [
-        (
-            a,
-            ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png",
-            int(re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)),
-        )
-        for a in ICON_MASKS_DIR.glob("mask*a.png")
-        if re.match(r"mask(\d+)a\.png$", a.name.lower())
-        and (ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png").exists()
-    ]
+    a_masks_by_idx = {}
+    for a in ICON_MASKS_DIR.glob("mask*a*.png"):
+        m = re.match(r"mask(\d+)a(\d*)\.png$", a.name.lower())
+        if not m:
+            continue
+        idx = int(m.group(1))
+        variant = int(m.group(2) or "0")
+        a_masks_by_idx.setdefault(idx, []).append((variant, a))
+
+    pairs = []
+    for idx, candidates in a_masks_by_idx.items():
+        b_mask = ICON_MASKS_DIR / f"mask{idx}b.png"
+        if not b_mask.exists():
+            continue
+        # Prefer numbered variants (ex: mask3a2.png) over base masks (ex: mask3a.png).
+        # This allows wwm_gvg.py to explicitly use mask3a2 + mask3b while still
+        # supporting standard pairs like mask6a + mask6b.
+        best_a = max(candidates, key=lambda item: item[0])[1]
+        pairs.append((best_a, b_mask, idx))
     pairs.sort(key=lambda t: t[2])
 
     icon_params = []
