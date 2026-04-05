@@ -136,12 +136,14 @@ BUFF_DEFS = {
         "templates": DETECT_ICON_TEMPLATE_PATHS,
         "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
         "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
+        "presence_stable_frames": 2,
         "has_activation": True,
     },
     "soulshade": {
         "templates": SOULSHADE_TEMPLATE_PATHS,
         "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
         "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
+        "presence_stable_frames": 2,
         "has_activation": False,
     },
 }
@@ -171,6 +173,7 @@ class SharedState:
         self.buff_last_seen_time = {}
         self.buff_template_present = {}
         self.buff_template_last_seen_time = {}
+        self.buff_presence_candidate_streak = {}
 
 global_state = SharedState()
 
@@ -720,12 +723,14 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
 
             for buff_key, cfg in BUFF_DEFS.items():
                 template_metrics = []
+                soft_match_any = False
                 for tpl_idx, (tpl_gray, tpl_edges, tpl_mask) in enumerate(tpl_cache[buff_key]):
                     ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
                     template_metrics.append((ok, corr, sq, mad, eiou))
                     template_key = (buff_key, tpl_idx)
                     pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
                     template_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                    soft_match_any = soft_match_any or template_ok
                     with global_state.lock:
                         if template_ok:
                             global_state.buff_template_last_seen_time[template_key] = now
@@ -733,18 +738,25 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                         tpl_present = (now - tpl_last_seen) <= float(cfg["lost_grace"])
                         global_state.buff_template_present[template_key] = tpl_present
 
+                strict_match_any = any(ok for ok, _, _, _, _ in template_metrics)
                 with global_state.lock:
-                    presence_ok = any(
-                        bool(global_state.buff_template_present.get((buff_key, tpl_idx), False))
-                        for tpl_idx in range(len(tpl_cache[buff_key]))
-                    )
-                    if presence_ok:
+                    streak = int(global_state.buff_presence_candidate_streak.get(buff_key, 0))
+                    if strict_match_any:
+                        streak = max(streak, int(cfg.get("presence_stable_frames", 1)))
+                    elif soft_match_any:
+                        streak += 1
+                    else:
+                        streak = 0
+                    global_state.buff_presence_candidate_streak[buff_key] = streak
+
+                    presence_ok = streak >= int(cfg.get("presence_stable_frames", 1))
+                    if presence_ok or strict_match_any:
                         global_state.buff_last_seen_time[buff_key] = now
                     last_seen = float(global_state.buff_last_seen_time.get(buff_key, 0.0))
                     global_state.buff_present[buff_key] = (now - last_seen) <= float(cfg["lost_grace"])
 
                 if buff_key == "intoxicated":
-                    intox_ok = any(ok for ok, _, _, _, _ in template_metrics)
+                    intox_ok = strict_match_any
 
             stable_hits = stable_hits + 1 if intox_ok else 0
             if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
