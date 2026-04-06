@@ -127,6 +127,16 @@ SOULSHADE_TEMPLATE_PATHS = [
 
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
+ROI_THRESHOLD_PCT = 90.0
+ROI_TIE_MARGIN_PCT = 3.0
+DEBUG_PRINT_INTERVAL_SEC = 1.0
+
+# Stricter buff sub-ROIs (x0, y0, x1, y1) in normalized template space.
+# These are intentionally configurable so detection can be tuned without rewrites.
+STRICT_BUFF_ROI_FRAC = {
+    "intoxicated": (0.18, 0.18, 0.82, 0.82),
+    "soulshade": (0.18, 0.18, 0.82, 0.82),
+}
 
 TH_CORR, TH_SQDIFF, TH_MAD, TH_EDGE_IOU = 0.82, 0.18, 0.12, 0.45
 TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU = 0.70, 0.30, 0.20, 0.30
@@ -359,14 +369,14 @@ def load_template(path):
 def masked_metrics(roi_bgr, tpl_gray, tpl_edges, mask):
     roi_gray = cv2.GaussianBlur(cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY), (3, 3), 0)
     th, tw = tpl_gray.shape[:2]
-    if roi_gray.shape[0] < th or roi_gray.shape[1] < tw: return False, 0.0, 1.0, 1.0, 0.0
+    if roi_gray.shape[0] < th or roi_gray.shape[1] < tw: return False, 0.0, 1.0, 1.0, 0.0, None
 
     _, corr_max, _, loc_corr = cv2.minMaxLoc(cv2.matchTemplate(roi_gray, tpl_gray, cv2.TM_CCORR_NORMED, mask=mask))
     sq_min, _, _, _ = cv2.minMaxLoc(cv2.matchTemplate(roi_gray, tpl_gray, cv2.TM_SQDIFF_NORMED, mask=mask))
     
     x, y = loc_corr
     patch = roi_gray[y:y + th, x:x + tw]
-    if patch.shape[:2] != (th, tw): return False, float(corr_max), float(sq_min), 1.0, 0.0
+    if patch.shape[:2] != (th, tw): return False, float(corr_max), float(sq_min), 1.0, 0.0, None
 
     mad = float((np.abs(patch.astype(np.float32) / 255.0 - tpl_gray.astype(np.float32) / 255.0) * (mask.astype(np.float32) / 255.0)).sum() / (float((mask.astype(np.float32) / 255.0).sum()) + 1e-6))
     patch_edges = cv2.bitwise_and(cv2.Canny(patch, 60, 180), cv2.Canny(patch, 60, 180), mask=mask)
@@ -375,7 +385,73 @@ def masked_metrics(roi_bgr, tpl_gray, tpl_edges, mask):
     edge_iou = float(np.logical_and(pe, te).sum()) / (float(np.logical_or(pe, te).sum()) + 1e-6)
     
     ok = (corr_max >= TH_CORR) and (sq_min <= TH_SQDIFF) and (mad <= TH_MAD) and (edge_iou >= TH_EDGE_IOU)
-    return ok, float(corr_max), float(sq_min), mad, edge_iou
+    return ok, float(corr_max), float(sq_min), mad, edge_iou, patch
+
+
+def _build_strict_submask(mask: np.ndarray, roi_frac):
+    h, w = mask.shape[:2]
+    x0 = int(round(w * float(roi_frac[0])))
+    y0 = int(round(h * float(roi_frac[1])))
+    x1 = int(round(w * float(roi_frac[2])))
+    y1 = int(round(h * float(roi_frac[3])))
+    x0, y0 = max(0, min(w - 1, x0)), max(0, min(h - 1, y0))
+    x1, y1 = max(x0 + 1, min(w, x1)), max(y0 + 1, min(h, y1))
+
+    strict_mask = np.zeros_like(mask)
+    strict_mask[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+    if int((strict_mask > 0).sum()) < MIN_MASK_PIXELS:
+        return mask
+    return strict_mask
+
+
+def _roi_match_pct(patch_gray: np.ndarray, tpl_gray: np.ndarray, strict_mask: np.ndarray) -> float:
+    if patch_gray is None:
+        return 0.0
+    sm = (strict_mask.astype(np.float32) / 255.0)
+    den = float(sm.sum())
+    if den <= 1e-6:
+        return 0.0
+    mad = float((np.abs(patch_gray.astype(np.float32) / 255.0 - tpl_gray.astype(np.float32) / 255.0) * sm).sum() / den)
+    pct = max(0.0, min(100.0, (1.0 - mad) * 100.0))
+    return pct
+
+
+def compute_buff_roi_match_pct(roi_bgr: np.ndarray, templates: list, strict_roi_frac):
+    best_pct = 0.0
+    best_metrics = None
+    for tpl_gray, tpl_edges, tpl_mask in templates:
+        ok, corr, sq, mad, eiou, patch = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
+        strict_mask = _build_strict_submask(tpl_mask, strict_roi_frac)
+        roi_pct = _roi_match_pct(patch, tpl_gray, strict_mask)
+        if best_metrics is None or roi_pct > best_pct:
+            best_pct = roi_pct
+            best_metrics = (ok, corr, sq, mad, eiou, roi_pct)
+    if best_metrics is None:
+        best_metrics = (False, 0.0, 1.0, 1.0, 0.0, 0.0)
+    return best_pct, best_metrics
+
+
+def resolve_competing_buff_winner(intox_pct: float, soul_pct: float, prior_active_key: str):
+    intox_ok = intox_pct > ROI_THRESHOLD_PCT
+    soul_ok = soul_pct > ROI_THRESHOLD_PCT
+
+    if intox_ok and not soul_ok:
+        return "INTOXICATED", "intoxicated"
+    if soul_ok and not intox_ok:
+        return "SOULSHADE", "soulshade"
+    if not intox_ok and not soul_ok:
+        return "NONE", None
+
+    # Both above threshold: choose clear winner, but keep prior stable state on near ties.
+    delta = abs(float(intox_pct) - float(soul_pct))
+    if delta >= ROI_TIE_MARGIN_PCT:
+        if intox_pct >= soul_pct:
+            return "INTOXICATED", "intoxicated"
+        return "SOULSHADE", "soulshade"
+
+    if prior_active_key in ("intoxicated", "soulshade"):
+        return "AMBIGUOUS", prior_active_key
+    return "AMBIGUOUS", None
 
 # ============================================================
 # Core Detector Classes (Cooldowns)
@@ -707,6 +783,7 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
     """
     last_activation_time = 0.0
     stable_hits = 0
+    last_debug_print_at = 0.0
 
     with mss() as sct:
         while not stop_evt.is_set():
@@ -720,26 +797,34 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
             shot = np.array(sct.grab(roi_monitor), dtype=np.uint8)
             roi_bgr = shot[:, :, :3]
 
-            intox_ok = False
+            with global_state.lock:
+                prior_active_key = None
+                if global_state.buff_present.get("intoxicated", False):
+                    prior_active_key = "intoxicated"
+                elif global_state.buff_present.get("soulshade", False):
+                    prior_active_key = "soulshade"
+
+            buff_eval = {}
+            for buff_key, cfg in BUFF_DEFS.items():
+                strict_roi_frac = STRICT_BUFF_ROI_FRAC.get(buff_key, (0.0, 0.0, 1.0, 1.0))
+                roi_pct, best_metrics = compute_buff_roi_match_pct(roi_bgr, tpl_cache[buff_key], strict_roi_frac)
+                ok, corr, sq, mad, eiou, _ = best_metrics
+                pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
+                soft_match_any = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                buff_eval[buff_key] = {
+                    "roi_pct": roi_pct,
+                    "strict_match": bool(ok),
+                    "soft_match": bool(soft_match_any),
+                }
+
+            intox_pct = float(buff_eval["intoxicated"]["roi_pct"])
+            soul_pct = float(buff_eval["soulshade"]["roi_pct"])
+            winner_label, active_key = resolve_competing_buff_winner(intox_pct, soul_pct, prior_active_key)
+            intox_ok = active_key == "intoxicated"
 
             for buff_key, cfg in BUFF_DEFS.items():
-                template_metrics = []
-                soft_match_any = False
-                for tpl_idx, (tpl_gray, tpl_edges, tpl_mask) in enumerate(tpl_cache[buff_key]):
-                    ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
-                    template_metrics.append((ok, corr, sq, mad, eiou))
-                    template_key = (buff_key, tpl_idx)
-                    pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
-                    template_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
-                    soft_match_any = soft_match_any or template_ok
-                    with global_state.lock:
-                        if template_ok:
-                            global_state.buff_template_last_seen_time[template_key] = now
-                        tpl_last_seen = float(global_state.buff_template_last_seen_time.get(template_key, 0.0))
-                        tpl_present = (now - tpl_last_seen) <= float(cfg["lost_grace"])
-                        global_state.buff_template_present[template_key] = tpl_present
-
-                strict_match_any = any(ok for ok, _, _, _, _ in template_metrics)
+                strict_match_any = (active_key == buff_key) and (buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT)
+                soft_match_any = (active_key == buff_key) and buff_eval[buff_key]["soft_match"]
                 with global_state.lock:
                     streak = int(global_state.buff_presence_candidate_streak.get(buff_key, 0))
                     if strict_match_any:
@@ -754,10 +839,25 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     if presence_ok or strict_match_any:
                         global_state.buff_last_seen_time[buff_key] = now
                     last_seen = float(global_state.buff_last_seen_time.get(buff_key, 0.0))
-                    global_state.buff_present[buff_key] = (now - last_seen) <= float(cfg["lost_grace"])
+                    # Hard ROI gate: a buff can only be present when current strict ROI eligibility passes.
+                    global_state.buff_present[buff_key] = bool(strict_match_any and ((now - last_seen) <= float(cfg["lost_grace"])))
 
-                if buff_key == "intoxicated":
-                    intox_ok = strict_match_any
+            with global_state.lock:
+                active_state = "NONE"
+                if global_state.buff_present.get("intoxicated", False):
+                    active_state = "INTOXICATED"
+                elif global_state.buff_present.get("soulshade", False):
+                    active_state = "SOULSHADE"
+
+            if DEBUG and (now - last_debug_print_at) >= DEBUG_PRINT_INTERVAL_SEC:
+                intox_pass = intox_pct > ROI_THRESHOLD_PCT
+                soul_pass = soul_pct > ROI_THRESHOLD_PCT
+                print(
+                    f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
+                    f"intox_ok={intox_pass} soul_ok={soul_pass} "
+                    f"winner={winner_label} active={active_state}"
+                )
+                last_debug_print_at = now
 
             stable_hits = stable_hits + 1 if intox_ok else 0
             if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
