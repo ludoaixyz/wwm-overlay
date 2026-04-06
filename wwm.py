@@ -127,9 +127,10 @@ SOULSHADE_TEMPLATE_PATHS = [
 
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
-ROI_THRESHOLD_PCT = 90.0
+ROI_THRESHOLD_PCT = 95.0
 ROI_TIE_MARGIN_PCT = 3.0
 DEBUG_PRINT_INTERVAL_SEC = 1.0
+BUFF_DETECT_WHEN_UNFOCUSED = True
 
 # Stricter buff sub-ROIs (x0, y0, x1, y1) in normalized template space.
 # These are intentionally configurable so detection can be tuned without rewrites.
@@ -789,7 +790,8 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
         while not stop_evt.is_set():
             now = time.time()
 
-            if (foreground_process_name() or "").lower() != TARGET_EXE.lower() and not BYPASS_FOCUS:
+            focus_ok = BYPASS_FOCUS or (foreground_process_name() or "").lower() == TARGET_EXE.lower()
+            if not focus_ok and not BUFF_DETECT_WHEN_UNFOCUSED:
                 stable_hits = 0
                 time.sleep(0.05)
                 continue
