@@ -823,6 +823,16 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
             soul_pct = float(buff_eval["soulshade"]["roi_pct"])
             winner_label, active_key = resolve_competing_buff_winner(intox_pct, soul_pct, prior_active_key)
             intox_ok = active_key == "intoxicated"
+            intox_strict_ok = intox_pct > ROI_THRESHOLD_PCT
+            soul_strict_ok = soul_pct > ROI_THRESHOLD_PCT
+
+            with global_state.lock:
+                global_state.buff_template_present["intoxicated"] = bool(intox_strict_ok)
+                global_state.buff_template_present["soulshade"] = bool(soul_strict_ok)
+                if intox_strict_ok:
+                    global_state.buff_template_last_seen_time["intoxicated"] = now
+                if soul_strict_ok:
+                    global_state.buff_template_last_seen_time["soulshade"] = now
 
             for buff_key, cfg in BUFF_DEFS.items():
                 strict_match_any = (active_key == buff_key) and (buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT)
@@ -996,12 +1006,15 @@ def main():
         with global_state.lock:
             intoxicated_present = bool(global_state.buff_present.get("intoxicated", False))
             soulshade_present = bool(global_state.buff_present.get("soulshade", False))
+            soulshade_template_present = bool(global_state.buff_template_present.get("soulshade", False))
             block_until = float(global_state.intox_overlay_block_until)
 
         should_show_drunk = gate_on and (not intoxicated_present) and (now >= block_until)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
-        should_show_soulshade = gate_on and (not soulshade_present)
+        # Hide soulshade fire whenever the soulshade template itself is confidently present,
+        # even in ambiguous winner states where buff_present may remain false.
+        should_show_soulshade = gate_on and (not soulshade_present) and (not soulshade_template_present)
         overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
 
     timer = overlay.QtCore.QTimer()
