@@ -114,7 +114,6 @@ INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 
 INTOX_SOUND_DELAY_SECONDS = 26.3
 INTOX_MIN_GAP_SECONDS = 28.0
-INTOX_OVERLAY_COOLDOWN_SECONDS = 29.0
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
@@ -170,7 +169,6 @@ GIF_FADE_DURATION_SEC = 0.3
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.intox_overlay_block_until = 0.0
         self.intox_sound_play_at = None
         self.buff_present = {}
         self.buff_last_seen_time = {}
@@ -730,7 +728,6 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
     Intoxicated retains strict activation behavior:
       - strict-threshold activation
       - delayed sound playback
-      - temporary overlay blocking
 
     Soulshade is presence/absence only and does not schedule activation events.
     """
@@ -789,10 +786,6 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                 stable_hits = 0
                 with global_state.lock:
                     global_state.intox_sound_play_at = now + INTOX_SOUND_DELAY_SECONDS
-                    global_state.intox_overlay_block_until = max(
-                        global_state.intox_overlay_block_until,
-                        now + INTOX_OVERLAY_COOLDOWN_SECONDS,
-                    )
 
             with global_state.lock:
                 play_at = global_state.intox_sound_play_at
@@ -925,9 +918,9 @@ def main():
         with global_state.lock:
             intoxicated_present = bool(global_state.buff_present.get("intoxicated", False))
             soulshade_present = bool(global_state.buff_present.get("soulshade", False))
-            block_until = float(global_state.intox_overlay_block_until)
 
-        should_show_drunk = gate_on and (not intoxicated_present) and (now >= block_until)
+        # Intoxicated now follows soulshade-style presence checks only (no hard timer block).
+        should_show_drunk = gate_on and (not intoxicated_present)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
         should_show_soulshade = gate_on and (not soulshade_present)
