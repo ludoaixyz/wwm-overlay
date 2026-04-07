@@ -965,8 +965,6 @@ def main():
             was_focused = focus_ok
             overlay.post_set_force_hide(True)
             overlay.post_set_icons_visible(False)
-            for _gif_key in list(overlay.gif_cache.keys()):
-                overlay.post_set_gif_state(_gif_key, active=False)
             true_streak = false_streak = 0
             return
 
