@@ -997,11 +997,14 @@ def main():
         # 3. Apply Buff-driven Overlay Logic
         with global_state.lock:
             intoxicated_present = bool(global_state.buff_present.get("intoxicated", False))
+            intoxicated_template_present = bool(global_state.buff_template_present.get("intoxicated", False))
             soulshade_present = bool(global_state.buff_present.get("soulshade", False))
             soulshade_template_present = bool(global_state.buff_template_present.get("soulshade", False))
             block_until = float(global_state.intox_overlay_block_until)
 
-        should_show_drunk = gate_on and (not intoxicated_present) and (now >= block_until)
+        # Match soulshade robustness: hide intoxicated fire whenever the intoxicated
+        # template itself is confidently present, even if buff_present is currently false.
+        should_show_drunk = gate_on and (not intoxicated_present) and (not intoxicated_template_present) and (now >= block_until)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
         # Hide soulshade fire whenever the soulshade template itself is confidently present,
