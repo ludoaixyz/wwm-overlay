@@ -790,12 +790,6 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
         while not stop_evt.is_set():
             now = time.time()
 
-            focus_ok = BYPASS_FOCUS or (foreground_process_name() or "").lower() == TARGET_EXE.lower()
-            if not focus_ok and not BUFF_DETECT_WHEN_UNFOCUSED:
-                stable_hits = 0
-                time.sleep(0.05)
-                continue
-
             shot = np.array(sct.grab(roi_monitor), dtype=np.uint8)
             roi_bgr = shot[:, :, :3]
 
