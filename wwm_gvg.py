@@ -160,6 +160,8 @@ ANIMATED_OVERLAYS = {
     "intoxicated": {"path": GIFS_DIR / "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
+FADE_GIF_KEYS = {"intoxicated", "soulshade"}
+GIF_FADE_DURATION_SEC = 0.3
 
 
 # ============================================================
@@ -518,7 +520,10 @@ class UnifiedOverlayController:
                     "x": int(config["x"]),
                     "y": int(config["y"]),
                     "opacity": float(config["opacity"]),
-                    "active": False
+                    "active": False,
+                    "target_active": False,
+                    "alpha": 0.0,
+                    "fade_enabled": key in FADE_GIF_KEYS,
                 }
 
         class _Overlay(QtWidgets.QWidget):
@@ -541,6 +546,7 @@ class UnifiedOverlayController:
 
             def _tick(self):
                 changed = False
+                dt = 0.016
                 while not self.outer.q.empty():
                     cmd = self.outer.q.get_nowait()
                     op = cmd[0]
@@ -552,14 +558,36 @@ class UnifiedOverlayController:
                         _, key, active = cmd
                         if key in self.outer.gif_cache:
                             item = self.outer.gif_cache[key]
-                            if active and not item["active"]:
-                                item["movie"].start()
-                                item["active"] = True
+                            if item["fade_enabled"]:
+                                item["target_active"] = bool(active)
+                                if item["target_active"] and not item["active"]:
+                                    item["movie"].start()
+                                    item["active"] = True
                                 changed = True
-                            elif not active and item["active"]:
-                                item["movie"].stop()
-                                item["active"] = False
-                                changed = True
+                            else:
+                                if active and not item["active"]:
+                                    item["movie"].start()
+                                    item["active"] = True
+                                    changed = True
+                                elif not active and item["active"]:
+                                    item["movie"].stop()
+                                    item["active"] = False
+                                    changed = True
+
+                fade_step = 1.0 if GIF_FADE_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_DURATION_SEC)
+                for item in self.outer.gif_cache.values():
+                    if not item["fade_enabled"]:
+                        continue
+                    prev_alpha = item["alpha"]
+                    if item["target_active"]:
+                        item["alpha"] = min(1.0, item["alpha"] + fade_step)
+                    else:
+                        item["alpha"] = max(0.0, item["alpha"] - fade_step)
+                        if item["active"] and item["alpha"] <= 0.0:
+                            item["movie"].stop()
+                            item["active"] = False
+                    if item["alpha"] != prev_alpha:
+                        changed = True
 
                 if changed: self.update()
 
@@ -583,7 +611,8 @@ class UnifiedOverlayController:
                         pix = item["movie"].currentPixmap()
                         if not pix.isNull():
                             p.save()
-                            p.setOpacity(item["opacity"])
+                            draw_alpha = item["alpha"] if item["fade_enabled"] else 1.0
+                            p.setOpacity(item["opacity"] * draw_alpha)
                             p.drawPixmap(item["x"], item["y"], pix)
                             p.restore()
                 p.end()
