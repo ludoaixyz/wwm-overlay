@@ -113,6 +113,7 @@ BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 SOULSHADE_15_SOUND_PATH = AUDIO_DIR / "soulshade_15.mp3"
 SOULSHADE_5_SOUND_PATH = AUDIO_DIR / "soulshade_5.mp3"
+SOULSHADE_0_SOUND_PATH = AUDIO_DIR / "soulshade_0.mp3"
 
 INTOX_AUDIO_TRIGGER_TICKS = 28
 INTOX_AUDIO_TRIGGER_PCT = 98.0
@@ -190,6 +191,7 @@ class SharedState:
         self.buff_template_present = {}
         self.buff_template_last_seen_time = {}
         self.buff_presence_candidate_streak = {}
+        self.soul_streak = 0
 
 global_state = SharedState()
 
@@ -738,6 +740,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
     for cfg in ABILITIES.values():
         sound_path = str(cfg["sound"])
         cfg["sound_obj"] = pygame.mixer.Sound(sound_path) if os.path.exists(sound_path) else None
+    soulshade_0_sound = pygame.mixer.Sound(str(SOULSHADE_0_SOUND_PATH)) if SOULSHADE_0_SOUND_PATH.exists() else None
 
     detectors = {
         k: MultiMaskDetector(
@@ -755,6 +758,10 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
     with mss() as sct:
         mon = sct.monitors[1]
         for det in detectors.values(): det.prepare(int(mon["width"]), int(mon["height"]))
+        umbrella_count = 0
+        umbrella_counter = False
+        umbrella_count_active = False
+        last_umbrella_counted_epoch = None
 
         while not stop_evt.is_set():
             now = time.time()
@@ -770,6 +777,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         st["cooldown_end"] = now + float(cfg["cooldown"])
                         detectors[key].reset()
                         overlay.post_set_gif_state(key, active=False)
+                        if key == "umbrella":
+                            umbrella_count_active = True
                 
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
@@ -777,8 +786,29 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     if cfg.get("sound_obj"): 
                         try: cfg["sound_obj"].play()
                         except: pass
+                    if key == "umbrella":
+                        umbrella_counter = False
                     if ENABLE_READY_OVERLAY: 
                         overlay.post_set_gif_state(key, active=True)
+
+            if umbrella_count_active:
+                current_epoch_sec = int(now)
+                if last_umbrella_counted_epoch != current_epoch_sec:
+                    umbrella_count += 1
+                    last_umbrella_counted_epoch = current_epoch_sec
+
+                    if umbrella_count == 5 and not umbrella_counter:
+                        umbrella_counter = True
+                        umbrella_count = 0
+                        with global_state.lock:
+                            soul_streak = int(global_state.soul_streak)
+                        if soul_streak > 3:
+                            umbrella_count += 5
+
+                    if umbrella_count >= 10:
+                        if soulshade_0_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                            soulshade_0_sound.play()
+                        umbrella_count = 0
 
             time.sleep(SAMPLE_INTERVAL)
 
@@ -906,6 +936,9 @@ def buff_detector_loop(
                 soulshade_15_audio_armed = True
                 soulshade_5_audio_armed = True
                 last_soulshade_counted_epoch = None
+
+            with global_state.lock:
+                global_state.soul_streak = int(soulshade_audio_streak)
 
             if soulshade_15_audio_armed and soulshade_audio_streak >= SOULSHADE_15_AUDIO_TRIGGER_TICKS:
                 if soulshade_15_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
