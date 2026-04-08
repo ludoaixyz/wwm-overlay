@@ -111,9 +111,15 @@ DETECT_ICON_TEMPLATE_PATHS = [
 ]
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
+SOULSHADE_15_SOUND_PATH = AUDIO_DIR / "soulshade_15.mp3"
+SOULSHADE_55_SOUND_PATH = AUDIO_DIR / "soulshade_55.mp3"
+SOULSHADE_55_SOUND_PATH_FALLBACK = AUDIO_DIR / "soulshade_5.mp3"
 
 INTOX_AUDIO_TRIGGER_TICKS = 28
 INTOX_AUDIO_TRIGGER_PCT = 98.0
+SOULSHADE_AUDIO_TRIGGER_PCT = 98.0
+SOULSHADE_15_AUDIO_TRIGGER_TICKS = 45
+SOULSHADE_55_AUDIO_TRIGGER_TICKS = 55
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
@@ -778,17 +784,30 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
             time.sleep(SAMPLE_INTERVAL)
 
 
-def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, intox_sound):
+def buff_detector_loop(
+    stop_evt: threading.Event,
+    roi_monitor,
+    tpl_cache: dict,
+    intox_sound,
+    soulshade_15_sound,
+    soulshade_55_sound,
+):
     """
     Detect buff icons inside the shared ROI and update global_state.buff_present.
 
     Intoxicated audio plays after 26 consecutive 1-second epoch ticks where intox ROI is >= 99%.
-    Soulshade remains presence/absence only.
+    Soulshade audio:
+      - soulshade_15.mp3 after 45 consecutive 1-second ticks with soul ROI >= 98%
+      - soulshade_55.mp3 after 55 consecutive 1-second ticks with soul ROI >= 98%
     """
     intox_audio_streak = 0
     intox_audio_armed = True
+    soulshade_audio_streak = 0
+    soulshade_15_audio_armed = True
+    soulshade_55_audio_armed = True
     last_debug_print_at = 0.0
     last_intox_counted_epoch = None
+    last_soulshade_counted_epoch = None
 
     with mss() as sct:
         while not stop_evt.is_set():
@@ -857,6 +876,7 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
                     f"streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
+                    f"soul_streak={soulshade_audio_streak}/{SOULSHADE_55_AUDIO_TRIGGER_TICKS} "
                     f"active={active_state}"
                 )
                 last_debug_print_at = now
@@ -877,6 +897,26 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                 if (foreground_process_name() or "").lower() == TARGET_EXE.lower():
                     intox_sound.play()
                 intox_audio_armed = False
+
+            if soul_pct >= SOULSHADE_AUDIO_TRIGGER_PCT:
+                if last_soulshade_counted_epoch != current_epoch_sec:
+                    soulshade_audio_streak += 1
+                    last_soulshade_counted_epoch = current_epoch_sec
+            else:
+                soulshade_audio_streak = 0
+                soulshade_15_audio_armed = True
+                soulshade_55_audio_armed = True
+                last_soulshade_counted_epoch = None
+
+            if soulshade_15_audio_armed and soulshade_audio_streak >= SOULSHADE_15_AUDIO_TRIGGER_TICKS:
+                if soulshade_15_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                    soulshade_15_sound.play()
+                soulshade_15_audio_armed = False
+
+            if soulshade_55_audio_armed and soulshade_audio_streak >= SOULSHADE_55_AUDIO_TRIGGER_TICKS:
+                if soulshade_55_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                    soulshade_55_sound.play()
+                soulshade_55_audio_armed = False
 
             time.sleep(INTOX_CHECK_INTERVAL_SEC)
 
@@ -924,6 +964,9 @@ def main():
         tpl_cache[buff_key] = [load_template(str(template_path)) for template_path in cfg["templates"]]
 
     intox_sound = pygame.mixer.Sound(str(INTOX_SOUND_PATH))
+    soulshade_15_sound = pygame.mixer.Sound(str(SOULSHADE_15_SOUND_PATH)) if SOULSHADE_15_SOUND_PATH.exists() else None
+    soulshade_55_path = SOULSHADE_55_SOUND_PATH if SOULSHADE_55_SOUND_PATH.exists() else SOULSHADE_55_SOUND_PATH_FALLBACK
+    soulshade_55_sound = pygame.mixer.Sound(str(soulshade_55_path)) if soulshade_55_path.exists() else None
 
     # Setup UI Controller
     with mss() as sct: sw, sh = int(sct.monitors[1]["width"]), int(sct.monitors[1]["height"])
@@ -936,7 +979,11 @@ def main():
     threading.Thread(target=_space_keyboard_hook_loop, args=(stop_evt,), daemon=True).start()
     threading.Thread(target=icon_capture_loop, args=(overlay, stop_evt), daemon=True).start()
     threading.Thread(target=cooldown_detector_loop, args=(overlay, stop_evt), daemon=True).start()
-    threading.Thread(target=buff_detector_loop, args=(stop_evt, roi_monitor, tpl_cache, intox_sound), daemon=True).start()
+    threading.Thread(
+        target=buff_detector_loop,
+        args=(stop_evt, roi_monitor, tpl_cache, intox_sound, soulshade_15_sound, soulshade_55_sound),
+        daemon=True,
+    ).start()
 
     true_streak, false_streak, force_hide_until, was_focused = 0, 0, 0.0, False
 
