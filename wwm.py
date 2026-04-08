@@ -170,7 +170,8 @@ ANIMATED_OVERLAYS = {
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
 FADE_GIF_KEYS = {"intoxicated", "soulshade"}
-GIF_FADE_DURATION_SEC = 0.3
+GIF_FADE_IN_DURATION_SEC = 0.6
+GIF_FADE_OUT_DURATION_SEC = 0.3
 
 
 # ============================================================
@@ -626,15 +627,16 @@ class UnifiedOverlayController:
                                     item["active"] = False
                                     changed = True
 
-                fade_step = 1.0 if GIF_FADE_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_DURATION_SEC)
+                fade_in_step = 1.0 if GIF_FADE_IN_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_IN_DURATION_SEC)
+                fade_out_step = 1.0 if GIF_FADE_OUT_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_OUT_DURATION_SEC)
                 for item in self.outer.gif_cache.values():
                     if not item["fade_enabled"]:
                         continue
                     prev_alpha = item["alpha"]
                     if item["target_active"]:
-                        item["alpha"] = min(1.0, item["alpha"] + fade_step)
+                        item["alpha"] = min(1.0, item["alpha"] + fade_in_step)
                     else:
-                        item["alpha"] = max(0.0, item["alpha"] - fade_step)
+                        item["alpha"] = max(0.0, item["alpha"] - fade_out_step)
                         if item["active"] and item["alpha"] <= 0.0:
                             item["movie"].stop()
                             item["active"] = False
