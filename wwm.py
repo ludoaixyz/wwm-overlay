@@ -112,8 +112,8 @@ DETECT_ICON_TEMPLATE_PATHS = [
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 
-INTOX_SOUND_DELAY_SECONDS = 26.3
-INTOX_MIN_GAP_SECONDS = 28.0
+INTOX_AUDIO_TRIGGER_TICKS = 26
+INTOX_AUDIO_TRIGGER_PCT = 99.0
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
@@ -124,7 +124,6 @@ SOULSHADE_TEMPLATE_PATHS = [
     BUFF_MASKS_DIR / "soulshadebuff2b.png",
 ]
 
-STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
 ROI_THRESHOLD_PCT = 95.0
 DEBUG_PRINT_INTERVAL_SEC = 1.0
@@ -181,7 +180,6 @@ GIF_FADE_OUT_DURATION_SEC = 0.3
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.intox_sound_play_at = None
         self.buff_present = {}
         self.buff_last_seen_time = {}
         self.buff_template_present = {}
@@ -784,14 +782,11 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
     """
     Detect buff icons inside the shared ROI and update global_state.buff_present.
 
-    Intoxicated retains strict activation behavior:
-      - strict-threshold activation
-      - delayed sound playback
-
-    Soulshade is presence/absence only and does not schedule activation events.
+    Intoxicated audio plays after 26 consecutive detector ticks where intox ROI is >= 99%.
+    Soulshade remains presence/absence only.
     """
-    last_activation_time = 0.0
-    stable_hits = 0
+    intox_audio_streak = 0
+    intox_audio_armed = True
     last_debug_print_at = 0.0
 
     with mss() as sct:
@@ -860,26 +855,21 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                 print(
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
+                    f"streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
                     f"active={active_state}"
                 )
                 last_debug_print_at = now
 
-            with global_state.lock:
-                intox_ok = bool(global_state.buff_present.get("intoxicated", False))
-            stable_hits = stable_hits + 1 if intox_ok else 0
-            if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
-                last_activation_time = now
-                stable_hits = 0
-                with global_state.lock:
-                    global_state.intox_sound_play_at = now + INTOX_SOUND_DELAY_SECONDS
+            if intox_pct >= INTOX_AUDIO_TRIGGER_PCT:
+                intox_audio_streak += 1
+            else:
+                intox_audio_streak = 0
+                intox_audio_armed = True
 
-            with global_state.lock:
-                play_at = global_state.intox_sound_play_at
-            if play_at and now >= play_at:
+            if intox_audio_armed and intox_audio_streak >= INTOX_AUDIO_TRIGGER_TICKS:
                 if (foreground_process_name() or "").lower() == TARGET_EXE.lower():
                     intox_sound.play()
-                    with global_state.lock:
-                        global_state.intox_sound_play_at = None
+                intox_audio_armed = False
 
             time.sleep(INTOX_CHECK_INTERVAL_SEC)
 
