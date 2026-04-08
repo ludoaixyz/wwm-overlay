@@ -160,6 +160,7 @@ ANIMATED_OVERLAYS = {
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
 FADE_GIF_KEYS = {"intoxicated", "soulshade"}
+DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
 GIF_FADE_IN_DURATION_SEC = 0.6
 GIF_FADE_OUT_DURATION_SEC = 0.3
 
@@ -519,11 +520,13 @@ class UnifiedOverlayController:
                     "x": int(config["x"]),
                     "y": int(config["y"]),
                     "opacity": float(config["opacity"]),
-                    "active": False,
-                    "target_active": False,
+                    "active": key in DEFAULT_ACTIVE_GIF_KEYS,
+                    "target_active": key in DEFAULT_ACTIVE_GIF_KEYS,
                     "alpha": 0.0,
                     "fade_enabled": key in FADE_GIF_KEYS,
                 }
+                if key in DEFAULT_ACTIVE_GIF_KEYS:
+                    movie.start()
 
         class _Overlay(QtWidgets.QWidget):
             def __init__(self, outer):
