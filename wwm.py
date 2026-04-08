@@ -782,12 +782,13 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
     """
     Detect buff icons inside the shared ROI and update global_state.buff_present.
 
-    Intoxicated audio plays after 26 consecutive detector ticks where intox ROI is >= 99%.
+    Intoxicated audio plays after 26 consecutive 1-second epoch ticks where intox ROI is >= 99%.
     Soulshade remains presence/absence only.
     """
     intox_audio_streak = 0
     intox_audio_armed = True
     last_debug_print_at = 0.0
+    last_intox_counted_epoch = None
 
     with mss() as sct:
         while not stop_evt.is_set():
@@ -860,11 +861,17 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                 )
                 last_debug_print_at = now
 
+            # 1-second epoch ticker:
+            # Count at most once per UNIX epoch second, regardless of detector polling rate.
+            current_epoch_sec = int(now)
             if intox_pct >= INTOX_AUDIO_TRIGGER_PCT:
-                intox_audio_streak += 1
+                if last_intox_counted_epoch != current_epoch_sec:
+                    intox_audio_streak += 1
+                    last_intox_counted_epoch = current_epoch_sec
             else:
                 intox_audio_streak = 0
                 intox_audio_armed = True
+                last_intox_counted_epoch = None
 
             if intox_audio_armed and intox_audio_streak >= INTOX_AUDIO_TRIGGER_TICKS:
                 if (foreground_process_name() or "").lower() == TARGET_EXE.lower():
