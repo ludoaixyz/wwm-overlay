@@ -112,14 +112,13 @@ DETECT_ICON_TEMPLATE_PATHS = [
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
 SOULSHADE_15_SOUND_PATH = AUDIO_DIR / "soulshade_15.mp3"
-SOULSHADE_55_SOUND_PATH = AUDIO_DIR / "soulshade_55.mp3"
-SOULSHADE_55_SOUND_PATH_FALLBACK = AUDIO_DIR / "soulshade_5.mp3"
+SOULSHADE_5_SOUND_PATH = AUDIO_DIR / "soulshade_5.mp3"
 
 INTOX_AUDIO_TRIGGER_TICKS = 28
 INTOX_AUDIO_TRIGGER_PCT = 98.0
 SOULSHADE_AUDIO_TRIGGER_PCT = 98.0
 SOULSHADE_15_AUDIO_TRIGGER_TICKS = 45
-SOULSHADE_55_AUDIO_TRIGGER_TICKS = 55
+SOULSHADE_5_AUDIO_TRIGGER_TICKS = 56
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
@@ -790,7 +789,7 @@ def buff_detector_loop(
     tpl_cache: dict,
     intox_sound,
     soulshade_15_sound,
-    soulshade_55_sound,
+    soulshade_5_sound,
 ):
     """
     Detect buff icons inside the shared ROI and update global_state.buff_present.
@@ -798,13 +797,13 @@ def buff_detector_loop(
     Intoxicated audio plays after 26 consecutive 1-second epoch ticks where intox ROI is >= 99%.
     Soulshade audio:
       - soulshade_15.mp3 after 45 consecutive 1-second ticks with soul ROI >= 98%
-      - soulshade_55.mp3 after 55 consecutive 1-second ticks with soul ROI >= 98%
+      - soulshade_5.mp3 after 55 consecutive 1-second ticks with soul ROI >= 98%
     """
     intox_audio_streak = 0
     intox_audio_armed = True
     soulshade_audio_streak = 0
     soulshade_15_audio_armed = True
-    soulshade_55_audio_armed = True
+    soulshade_5_audio_armed = True
     last_debug_print_at = 0.0
     last_intox_counted_epoch = None
     last_soulshade_counted_epoch = None
@@ -876,7 +875,7 @@ def buff_detector_loop(
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
                     f"streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
-                    f"soul_streak={soulshade_audio_streak}/{SOULSHADE_55_AUDIO_TRIGGER_TICKS} "
+                    f"soul_streak={soulshade_audio_streak}/{SOULSHADE_5_AUDIO_TRIGGER_TICKS} "
                     f"active={active_state}"
                 )
                 last_debug_print_at = now
@@ -905,7 +904,7 @@ def buff_detector_loop(
             else:
                 soulshade_audio_streak = 0
                 soulshade_15_audio_armed = True
-                soulshade_55_audio_armed = True
+                soulshade_5_audio_armed = True
                 last_soulshade_counted_epoch = None
 
             if soulshade_15_audio_armed and soulshade_audio_streak >= SOULSHADE_15_AUDIO_TRIGGER_TICKS:
@@ -913,10 +912,10 @@ def buff_detector_loop(
                     soulshade_15_sound.play()
                 soulshade_15_audio_armed = False
 
-            if soulshade_55_audio_armed and soulshade_audio_streak >= SOULSHADE_55_AUDIO_TRIGGER_TICKS:
-                if soulshade_55_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
-                    soulshade_55_sound.play()
-                soulshade_55_audio_armed = False
+            if soulshade_5_audio_armed and soulshade_audio_streak >= SOULSHADE_5_AUDIO_TRIGGER_TICKS:
+                if soulshade_5_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                    soulshade_5_sound.play()
+                soulshade_5_audio_armed = False
 
             time.sleep(INTOX_CHECK_INTERVAL_SEC)
 
@@ -965,8 +964,7 @@ def main():
 
     intox_sound = pygame.mixer.Sound(str(INTOX_SOUND_PATH))
     soulshade_15_sound = pygame.mixer.Sound(str(SOULSHADE_15_SOUND_PATH)) if SOULSHADE_15_SOUND_PATH.exists() else None
-    soulshade_55_path = SOULSHADE_55_SOUND_PATH if SOULSHADE_55_SOUND_PATH.exists() else SOULSHADE_55_SOUND_PATH_FALLBACK
-    soulshade_55_sound = pygame.mixer.Sound(str(soulshade_55_path)) if soulshade_55_path.exists() else None
+    soulshade_5_sound = pygame.mixer.Sound(str(SOULSHADE_5_SOUND_PATH)) if SOULSHADE_5_SOUND_PATH.exists() else None
 
     # Setup UI Controller
     with mss() as sct: sw, sh = int(sct.monitors[1]["width"]), int(sct.monitors[1]["height"])
@@ -981,7 +979,7 @@ def main():
     threading.Thread(target=cooldown_detector_loop, args=(overlay, stop_evt), daemon=True).start()
     threading.Thread(
         target=buff_detector_loop,
-        args=(stop_evt, roi_monitor, tpl_cache, intox_sound, soulshade_15_sound, soulshade_55_sound),
+        args=(stop_evt, roi_monitor, tpl_cache, intox_sound, soulshade_15_sound, soulshade_5_sound),
         daemon=True,
     ).start()
 
