@@ -127,7 +127,6 @@ SOULSHADE_TEMPLATE_PATHS = [
 STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
 ROI_THRESHOLD_PCT = 95.0
-ROI_TIE_MARGIN_PCT = 3.0
 DEBUG_PRINT_INTERVAL_SEC = 1.0
 BUFF_DETECT_WHEN_UNFOCUSED = True
 
@@ -431,28 +430,6 @@ def compute_buff_roi_match_pct(roi_bgr: np.ndarray, templates: list, strict_roi_
         best_metrics = (False, 0.0, 1.0, 1.0, 0.0, 0.0)
     return best_pct, best_metrics
 
-
-def resolve_competing_buff_winner(intox_pct: float, soul_pct: float, prior_active_key: str):
-    intox_ok = intox_pct > ROI_THRESHOLD_PCT
-    soul_ok = soul_pct > ROI_THRESHOLD_PCT
-
-    if intox_ok and not soul_ok:
-        return "INTOXICATED", "intoxicated"
-    if soul_ok and not intox_ok:
-        return "SOULSHADE", "soulshade"
-    if not intox_ok and not soul_ok:
-        return "NONE", None
-
-    # Both above threshold: choose clear winner, but keep prior stable state on near ties.
-    delta = abs(float(intox_pct) - float(soul_pct))
-    if delta >= ROI_TIE_MARGIN_PCT:
-        if intox_pct >= soul_pct:
-            return "INTOXICATED", "intoxicated"
-        return "SOULSHADE", "soulshade"
-
-    if prior_active_key in ("intoxicated", "soulshade"):
-        return "AMBIGUOUS", prior_active_key
-    return "AMBIGUOUS", None
 
 # ============================================================
 # Core Detector Classes (Cooldowns)
@@ -819,13 +796,6 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
             shot = np.array(sct.grab(roi_monitor), dtype=np.uint8)
             roi_bgr = shot[:, :, :3]
 
-            with global_state.lock:
-                prior_active_key = None
-                if global_state.buff_present.get("intoxicated", False):
-                    prior_active_key = "intoxicated"
-                elif global_state.buff_present.get("soulshade", False):
-                    prior_active_key = "soulshade"
-
             buff_eval = {}
             for buff_key, cfg in BUFF_DEFS.items():
                 strict_roi_frac = STRICT_BUFF_ROI_FRAC.get(buff_key, (0.0, 0.0, 1.0, 1.0))
@@ -837,12 +807,10 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     "roi_pct": roi_pct,
                     "strict_match": bool(ok),
                     "soft_match": bool(soft_match_any),
-                }
+            }
 
             intox_pct = float(buff_eval["intoxicated"]["roi_pct"])
             soul_pct = float(buff_eval["soulshade"]["roi_pct"])
-            winner_label, active_key = resolve_competing_buff_winner(intox_pct, soul_pct, prior_active_key)
-            intox_ok = active_key == "intoxicated"
             intox_strict_ok = intox_pct > ROI_THRESHOLD_PCT
             soul_strict_ok = soul_pct > ROI_THRESHOLD_PCT
 
@@ -855,8 +823,8 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     global_state.buff_template_last_seen_time["soulshade"] = now
 
             for buff_key, cfg in BUFF_DEFS.items():
-                strict_match_any = (active_key == buff_key) and (buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT)
-                soft_match_any = (active_key == buff_key) and buff_eval[buff_key]["soft_match"]
+                strict_match_any = buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT
+                soft_match_any = buff_eval[buff_key]["soft_match"]
                 with global_state.lock:
                     streak = int(global_state.buff_presence_candidate_streak.get(buff_key, 0))
                     if strict_match_any:
@@ -887,10 +855,12 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                 print(
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
-                    f"winner={winner_label} active={active_state}"
+                    f"active={active_state}"
                 )
                 last_debug_print_at = now
 
+            with global_state.lock:
+                intox_ok = bool(global_state.buff_present.get("intoxicated", False))
             stable_hits = stable_hits + 1 if intox_ok else 0
             if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
                 last_activation_time = now
