@@ -786,6 +786,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     if cfg.get("sound_obj"): 
                         try: cfg["sound_obj"].play()
                         except: pass
+                    if key == "umbrella":
+                        umbrella_counter = False
                     if ENABLE_READY_OVERLAY: 
                         overlay.post_set_gif_state(key, active=True)
 
@@ -795,8 +797,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     umbrella_count += 1
                     last_umbrella_counted_epoch = current_epoch_sec
 
-                    umbrella_counter = (umbrella_count == 5)
-                    if umbrella_counter:
+                    if umbrella_count == 5 and not umbrella_counter:
+                        umbrella_counter = True
                         umbrella_count = 0
                         with global_state.lock:
                             soul_streak = int(global_state.soul_streak)
