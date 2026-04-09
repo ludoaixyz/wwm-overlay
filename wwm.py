@@ -194,6 +194,7 @@ class SharedState:
         self.buff_template_last_seen_time = {}
         self.buff_presence_candidate_streak = {}
         self.soul_streak = 0
+        self.umbrella_counter = 0
 
 global_state = SharedState()
 
@@ -800,6 +801,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                 umbrella_count_active = False
                 last_umbrella_counted_epoch = None
                 soul_streak_zero_run = 0
+                with global_state.lock:
+                    global_state.umbrella_counter = 0
             else:
                 umbrella_count_active = True
 
@@ -823,6 +826,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         if soulshade_0_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
                             soulshade_0_sound.play()
                         umbrella_count = 0
+                    with global_state.lock:
+                        global_state.umbrella_counter = int(umbrella_count)
 
             time.sleep(SAMPLE_INTERVAL)
 
@@ -905,22 +910,17 @@ def buff_detector_loop(
                     # Hard ROI gate: a buff can only be present when current strict ROI eligibility passes.
                     global_state.buff_present[buff_key] = bool(strict_match_any and ((now - last_seen) <= float(cfg["lost_grace"])))
 
-            with global_state.lock:
-                active_state = "NONE"
-                if global_state.buff_present.get("intoxicated", False):
-                    active_state = "INTOXICATED"
-                elif global_state.buff_present.get("soulshade", False):
-                    active_state = "SOULSHADE"
-
             if DEBUG and (now - last_debug_print_at) >= DEBUG_PRINT_INTERVAL_SEC:
                 intox_pass = intox_pct > ROI_THRESHOLD_PCT
                 soul_pass = soul_pct > ROI_THRESHOLD_PCT
+                with global_state.lock:
+                    umbrella_counter = int(global_state.umbrella_counter)
                 print(
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
-                    f"streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
+                    f"intox_streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
                     f"soul_streak={soulshade_audio_streak}/{SOULSHADE_5_AUDIO_TRIGGER_TICKS} "
-                    f"active={active_state}"
+                    f"umbrella_counter={umbrella_counter}"
                 )
                 last_debug_print_at = now
 
