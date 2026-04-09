@@ -811,6 +811,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     with global_state.lock:
                         soul_streak = int(global_state.soul_streak)
                     soul_streak_zero_run = (soul_streak_zero_run + 1) if soul_streak == 0 else 0
+                    if soul_streak != 0:
+                        umbrella_count = max(0, umbrella_count - 2)
 
                     # Discrete external acceleration check.
                     if umbrella_count == 3:
