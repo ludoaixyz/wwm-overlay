@@ -39,6 +39,8 @@ TARGET_EXE = "wwm.exe"
 BYPASS_FOCUS = False
 HIDE_WHEN_UNFOCUSED = False
 DEBUG = True
+CONSOLE_MAX_LINES = 100
+CONSOLE_REDRAW_EVERY = 20
 
 # --- Global Timers & Rates ---
 FRAME_SLEEP = 0.01
@@ -197,6 +199,31 @@ class SharedState:
         self.umbrella_counter = 0
 
 global_state = SharedState()
+
+# ============================================================
+# Console Logging (bounded in-memory output)
+# ============================================================
+_debug_console_buffer = deque(maxlen=CONSOLE_MAX_LINES)
+_debug_console_lock = threading.Lock()
+
+def buffered_console_log(msg: str, *, force_redraw: bool = False):
+    """
+    Keep terminal output bounded to avoid overwhelming console rendering/history.
+    On TTY consoles, redraw only the latest CONSOLE_MAX_LINES periodically.
+    On non-interactive outputs, fallback to normal print.
+    """
+    line = str(msg)
+    with _debug_console_lock:
+        _debug_console_buffer.append(line)
+        is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        should_redraw = force_redraw or (len(_debug_console_buffer) % CONSOLE_REDRAW_EVERY == 0)
+        if is_tty and should_redraw:
+            os.system("cls" if os.name == "nt" else "clear")
+            print("\n".join(_debug_console_buffer), flush=True)
+        elif is_tty:
+            print(line, flush=True)
+        elif not is_tty:
+            print(line, flush=True)
 
 # ============================================================
 # Spacebar hook
@@ -915,7 +942,7 @@ def buff_detector_loop(
                 soul_pass = soul_pct > ROI_THRESHOLD_PCT
                 with global_state.lock:
                     umbrella_counter = int(global_state.umbrella_counter)
-                print(
+                buffered_console_log(
                     f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
                     f"intox_ok={intox_pass} soul_ok={soul_pass} "
                     f"intox_streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
