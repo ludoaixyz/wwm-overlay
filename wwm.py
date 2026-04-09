@@ -6,6 +6,7 @@ import threading
 import queue
 import ctypes
 import signal
+import sys
 from collections import deque
 from ctypes import wintypes
 from pathlib import Path
@@ -230,7 +231,7 @@ def _space_keyboard_hook_loop(stop_evt: threading.Event):
     class KBDLLHOOKSTRUCT(ctypes.Structure):
         _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD), ("flags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
 
-    hook = wintypes.HANDLE()
+    hook_id = [None]
     LowLevelKeyboardProc = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
     def callback(nCode, wParam, lParam):
@@ -239,24 +240,28 @@ def _space_keyboard_hook_loop(stop_evt: threading.Event):
                 kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if int(kb.vkCode) == int(VK_SPACE):
                     _bump_space_hide(SPACE_FORCE_HIDE_SECONDS)
-        except Exception: pass
-        return user32.CallNextHookEx(hook, nCode, wParam, lParam)
+        except Exception:
+            pass
+        return user32.CallNextHookEx(hook_id[0], nCode, wParam, lParam)
 
-    cb = LowLevelKeyboardProc(callback)
+    pointer_callback = LowLevelKeyboardProc(callback)
     hmod = kernel32.GetModuleHandleW(None)
-    if not hmod: return
-    hook = user32.SetWindowsHookExW(13, cb, hmod, 0)
-    if not hook: return
+    if not hmod:
+        return
+
+    hook_id[0] = user32.SetWindowsHookExW(13, pointer_callback, hmod, 0)
+    if not hook_id[0]:
+        return
 
     msg = wintypes.MSG()
     try:
         while not stop_evt.is_set():
-            if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0x0001):
+            while user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 0x0001):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-            time.sleep(0.01)
+            time.sleep(0.005)
     finally:
-        user32.UnhookWindowsHookEx(hook)
+        user32.UnhookWindowsHookEx(hook_id[0])
 
 
 # ============================================================
@@ -1095,12 +1100,15 @@ def main():
         print("Interrupt received, shutting down...")
     finally:
         stop_evt.set()
+        print("\nShutting down threads...", flush=True)
+        time.sleep(0.1)
         try:
             pygame.mixer.quit()
         except Exception:
             pass
         app.quit()
-        print("Clean exit successful.")
+        sys.stdout.flush()
+        os._exit(0)
 
 if __name__ == "__main__":
     main()
