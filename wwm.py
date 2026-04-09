@@ -5,6 +5,7 @@ import time
 import threading
 import queue
 import ctypes
+import signal
 from collections import deque
 from ctypes import wintypes
 from pathlib import Path
@@ -250,13 +251,12 @@ def _space_keyboard_hook_loop(stop_evt: threading.Event):
     msg = wintypes.MSG()
     try:
         while not stop_evt.is_set():
-            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0x0001):
+            if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0x0001):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
             time.sleep(0.01)
     finally:
-        try: user32.UnhookWindowsHookEx(hook)
-        except: pass
+        user32.UnhookWindowsHookEx(hook)
 
 
 # ============================================================
@@ -958,6 +958,7 @@ def buff_detector_loop(
 # ============================================================
 def main():
     set_dpi_awareness()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     try: pygame.mixer.init(); pygame.mixer.set_num_channels(8)
     except: pass
 
@@ -1088,8 +1089,18 @@ def main():
     timer.timeout.connect(master_tick)
     timer.start(int(max(5, FRAME_SLEEP * 1000)))
 
-    try: app.exec()
-    finally: stop_evt.set()
+    try:
+        app.exec()
+    except KeyboardInterrupt:
+        print("Interrupt received, shutting down...")
+    finally:
+        stop_evt.set()
+        try:
+            pygame.mixer.quit()
+        except Exception:
+            pass
+        app.quit()
+        print("Clean exit successful.")
 
 if __name__ == "__main__":
     main()
