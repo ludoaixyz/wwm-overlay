@@ -766,6 +766,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
         umbrella_count = 0
         umbrella_count_active = False
         last_umbrella_counted_epoch = None
+        soul_streak_zero_run = 0
 
         while not stop_evt.is_set():
             now = time.time()
@@ -798,6 +799,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                 umbrella_count = 0
                 umbrella_count_active = False
                 last_umbrella_counted_epoch = None
+                soul_streak_zero_run = 0
             else:
                 umbrella_count_active = True
 
@@ -806,15 +808,16 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                 if last_umbrella_counted_epoch != current_epoch_sec:
                     umbrella_count += 1
                     last_umbrella_counted_epoch = current_epoch_sec
+                    with global_state.lock:
+                        soul_streak = int(global_state.soul_streak)
+                    soul_streak_zero_run = (soul_streak_zero_run + 1) if soul_streak == 0 else 0
 
                     # Discrete external acceleration check.
                     if umbrella_count == 3:
-                        with global_state.lock:
-                            soul_streak = int(global_state.soul_streak)
-                        if soul_streak >= 3:
+                        if soul_streak_zero_run >= 3:
                             umbrella_count += 5
 
-                    if umbrella_count >= 10:
+                    if umbrella_count >= 11:
                         if soulshade_0_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
                             soulshade_0_sound.play()
                         umbrella_count = 0
