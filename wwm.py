@@ -764,7 +764,6 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
         mon = sct.monitors[1]
         for det in detectors.values(): det.prepare(int(mon["width"]), int(mon["height"]))
         umbrella_count = 0
-        umbrella_counter = False
         umbrella_count_active = False
         last_umbrella_counted_epoch = None
 
@@ -784,30 +783,35 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         overlay.post_set_gif_state(key, active=False)
                         if key == "umbrella":
                             umbrella_count_active = True
-                
+
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
                     detectors[key].reset()
                     if cfg.get("sound_obj"): 
                         try: cfg["sound_obj"].play()
                         except: pass
-                    if key == "umbrella":
-                        umbrella_counter = False
                     if ENABLE_READY_OVERLAY: 
                         overlay.post_set_gif_state(key, active=True)
 
-            if umbrella_count_active:
+            umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
+            if not umbrella_on_cooldown:
+                umbrella_count = 0
+                umbrella_count_active = False
+                last_umbrella_counted_epoch = None
+            else:
+                umbrella_count_active = True
+
+            if umbrella_count_active and umbrella_on_cooldown:
                 current_epoch_sec = int(now)
                 if last_umbrella_counted_epoch != current_epoch_sec:
                     umbrella_count += 1
                     last_umbrella_counted_epoch = current_epoch_sec
 
-                    if umbrella_count == 5 and not umbrella_counter:
-                        umbrella_counter = True
-                        umbrella_count = 0
+                    # Discrete external acceleration check.
+                    if umbrella_count == 3:
                         with global_state.lock:
                             soul_streak = int(global_state.soul_streak)
-                        if soul_streak > 3:
+                        if soul_streak >= 3:
                             umbrella_count += 5
 
                     if umbrella_count >= 10:
