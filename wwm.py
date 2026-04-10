@@ -591,7 +591,11 @@ class UnifiedOverlayController:
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.icon_params = icon_params
-        self.q = queue.Queue()
+        self.q = queue.Queue(maxsize=256)
+        self._command_lock = threading.Lock()
+        self._last_icons_visible = None
+        self._last_force_hide = None
+        self._last_gif_state = {}
         
         self.visible_icons = False
         self.force_hide = False
@@ -722,9 +726,36 @@ class UnifiedOverlayController:
             self._z_timer.timeout.connect(lambda: self._raise_topmost(self._hwnd) if not self.force_hide and self.visible_icons else None)
             self._z_timer.start(int(Z_ORDER_PULSE_MS))
 
-    def post_set_icons_visible(self, v: bool): self.q.put(("set_icons_visible", bool(v)))
-    def post_set_force_hide(self, v: bool): self.q.put(("set_force_hide", bool(v)))
-    def post_set_gif_state(self, key: str, active: bool): self.q.put(("set_gif_state", key, active))
+    def _enqueue_cmd(self, cmd):
+        try:
+            self.q.put_nowait(cmd)
+        except queue.Full:
+            # Drop commands under burst load; state dedupe below keeps behavior stable.
+            pass
+
+    def post_set_icons_visible(self, v: bool):
+        v = bool(v)
+        with self._command_lock:
+            if self._last_icons_visible == v:
+                return
+            self._last_icons_visible = v
+        self._enqueue_cmd(("set_icons_visible", v))
+
+    def post_set_force_hide(self, v: bool):
+        v = bool(v)
+        with self._command_lock:
+            if self._last_force_hide == v:
+                return
+            self._last_force_hide = v
+        self._enqueue_cmd(("set_force_hide", v))
+
+    def post_set_gif_state(self, key: str, active: bool):
+        active = bool(active)
+        with self._command_lock:
+            if self._last_gif_state.get(key) == active:
+                return
+            self._last_gif_state[key] = active
+        self._enqueue_cmd(("set_gif_state", key, active))
 
     def update_icon_frame(self, idx: int, qimg): self.icon_params[idx]["_qimg"] = qimg
     def request_repaint(self): self.window.update()
@@ -1046,6 +1077,7 @@ def main():
     from PySide6 import QtWidgets
     app = QtWidgets.QApplication([])
     overlay = UnifiedOverlayController(sw, sh, icon_params)
+    gate_sct = mss()
 
     # Launch Threads
     stop_evt = threading.Event()
@@ -1087,11 +1119,10 @@ def main():
         # 2. Gate Checking (Only check ONCE for the whole application)
         if BYPASS_GATES: gate_on = True
         else:
-            with mss() as sct_local:
-                shot1 = np.array(sct_local.grab(grab_bool1), dtype=np.uint8)
-                g1_ok = (float((shot1[:, :, [2, 1, 0]].astype(np.uint8).min(axis=2)[bool1_red_rel_mask] >= WHITE_MIN).mean()) >= WHITE_REQUIRED_RATIO)
-                shot2 = np.array(sct_local.grab(grab_bool2), dtype=np.uint8)
-                g2_ok = gate2_multi_patches(shot2, bool2_patch_masks)
+            shot1 = np.array(gate_sct.grab(grab_bool1), dtype=np.uint8)
+            g1_ok = (float((shot1[:, :, [2, 1, 0]].astype(np.uint8).min(axis=2)[bool1_red_rel_mask] >= WHITE_MIN).mean()) >= WHITE_REQUIRED_RATIO)
+            shot2 = np.array(gate_sct.grab(grab_bool2), dtype=np.uint8)
+            g2_ok = gate2_multi_patches(shot2, bool2_patch_masks)
             gate_on = g1_ok and g2_ok
 
         if ENABLE_HYSTERESIS:
@@ -1138,6 +1169,10 @@ def main():
         stop_evt.set()
         print("\nShutting down threads...", flush=True)
         time.sleep(0.1)
+        try:
+            gate_sct.close()
+        except Exception:
+            pass
         try:
             pygame.mixer.quit()
         except Exception:
