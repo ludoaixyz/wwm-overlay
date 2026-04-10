@@ -854,7 +854,10 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         overlay.post_set_gif_state(key, active=True)
 
             umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
-            if not umbrella_on_cooldown:
+            cloud_on_cooldown = state["cloud"]["cooldown_end"] is not None
+            umbrella_count_should_run = umbrella_on_cooldown or cloud_on_cooldown
+
+            if not umbrella_count_should_run:
                 umbrella_count = 0
                 umbrella_count_active = False
                 last_umbrella_counted_epoch = None
@@ -864,7 +867,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
             else:
                 umbrella_count_active = True
 
-            if umbrella_count_active and umbrella_on_cooldown:
+            if umbrella_count_active and umbrella_count_should_run:
                 current_epoch_sec = int(now)
                 if last_umbrella_counted_epoch != current_epoch_sec:
                     umbrella_count += 1
