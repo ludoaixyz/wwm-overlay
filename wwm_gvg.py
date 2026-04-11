@@ -1049,6 +1049,15 @@ def main():
         variant = int(match.group(2) or "0")
         a_masks_by_idx.setdefault(idx, []).append((variant, a_name, a))
 
+    single_masks_by_idx = {}
+    for single in ICON_MASKS_DIR.glob("mask*.png"):
+        single_name = single.name.lower()
+        match = re.match(r"mask(\d+)\.png$", single_name)
+        if not match:
+            continue
+        idx = int(match.group(1))
+        single_masks_by_idx[idx] = single
+
     pairs = []
     for idx, candidates in a_masks_by_idx.items():
         b_mask = ICON_MASKS_DIR / f"mask{idx}b.png"
@@ -1063,6 +1072,11 @@ def main():
             best_a = max(candidates, key=lambda item: item[0])[2]
 
         pairs.append((best_a, b_mask, idx))
+
+    for idx, single_mask in single_masks_by_idx.items():
+        if idx in a_masks_by_idx:
+            continue
+        pairs.append((single_mask, single_mask, idx))
 
     pairs.sort(key=lambda t: t[2])
 
