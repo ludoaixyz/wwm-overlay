@@ -1052,6 +1052,8 @@ def main():
         variant = int(match.group(2) or "0")
         a_masks_by_idx.setdefault(idx, []).append((variant, a_name, a))
 
+    # mask7.png is a gate-only probe and should never be rendered as a visible icon.
+    hidden_gate_mask_indices = {7}
     single_masks_by_idx = {}
     for single in ICON_MASKS_DIR.glob("mask*.png"):
         single_name = single.name.lower()
@@ -1059,6 +1061,8 @@ def main():
         if not match:
             continue
         idx = int(match.group(1))
+        if idx in hidden_gate_mask_indices:
+            continue
         single_masks_by_idx[idx] = single
 
     pairs = []
