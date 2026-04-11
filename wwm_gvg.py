@@ -180,8 +180,8 @@ ANIMATED_OVERLAYS = {
 }
 FADE_GIF_KEYS = {"intoxicated", "soulshade"}
 DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
-GIF_FADE_IN_DURATION_SEC = 0.6
-GIF_FADE_OUT_DURATION_SEC = 0.3
+GIF_FADE_IN_DURATION_SEC = 0.3
+GIF_FADE_OUT_DURATION_SEC = 0.1
 
 
 # ============================================================
