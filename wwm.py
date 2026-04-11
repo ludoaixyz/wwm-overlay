@@ -1038,16 +1038,27 @@ def main():
     except: pass
 
     # Initialize Base Icon Params
-    pairs = [
-        (
-            a,
-            ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png",
-            int(re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)),
-        )
-        for a in ICON_MASKS_DIR.glob("mask*a.png")
-        if re.match(r"mask(\d+)a\.png$", a.name.lower())
-        and (ICON_MASKS_DIR / f"mask{re.match(r'mask(\d+)a\.png$', a.name.lower()).group(1)}b.png").exists()
-    ]
+    excluded_icon_masks = {"mask3a2.png", "mask6a.png", "mask6b.png"}
+    pairs = []
+    for a in ICON_MASKS_DIR.glob("mask*a*.png"):
+        a_name = a.name.lower()
+        match = re.match(r"mask(\d+)a(\d*)\.png$", a_name)
+        if not match or a_name in excluded_icon_masks:
+            continue
+        idx = int(match.group(1))
+        b_mask = ICON_MASKS_DIR / f"mask{idx}b.png"
+        if not b_mask.exists() or b_mask.name.lower() in excluded_icon_masks:
+            continue
+        variant = int(match.group(2) or "0")
+        pairs.append((idx, variant, a, b_mask))
+
+    best_pairs_by_idx = {}
+    for idx, variant, a, b in pairs:
+        prev = best_pairs_by_idx.get(idx)
+        if prev is None or variant > prev[0]:
+            best_pairs_by_idx[idx] = (variant, a, b)
+
+    pairs = [(a, b, idx) for idx, (_, a, b) in best_pairs_by_idx.items()]
     pairs.sort(key=lambda t: t[2])
 
     icon_params = []
