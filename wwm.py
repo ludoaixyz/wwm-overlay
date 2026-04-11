@@ -54,6 +54,9 @@ Z_ORDER_PULSE_MS = 250
 WHITE_MIN = 240
 WHITE_REQUIRED_RATIO = 0.70
 BOOL1_PADDING = 2
+MASK7_HIDE_WHITE_MIN = 245
+MASK7_HIDE_REQUIRED_RATIO = 0.90
+MASK7_PADDING = 2
 
 G2_MEDIAN_MIN = 0
 G2_MEDIAN_MAX = 100
@@ -1071,8 +1074,10 @@ def main():
     # Initialize Global Gates
     maskBool1 = Image.open(GATE_MASKS_DIR / "maskboolean.png").convert("RGBA")
     maskBool2 = Image.open(GATE_MASKS_DIR / "maskboolean2.png").convert("RGBA")
+    mask7_hide = Image.open(ICON_MASKS_DIR / "mask7.png").convert("RGBA")
     grab_bool1, bool1_red_rel_mask = build_masked_sampler(maskBool1, padding=BOOL1_PADDING)
     grab_bool2, bool2_patch_masks = build_multi_patch_sampler(maskBool2, padding=BOOL2_PADDING)
+    grab_mask7_hide, mask7_red_rel_mask = build_masked_sampler(mask7_hide, padding=MASK7_PADDING)
 
     # Initialize Buff Logic (shared ROI)
     x0, y0, x1, y1 = find_red_roi_from_bg(str(BG_ROI_GUIDE_PATH))
@@ -1138,6 +1143,16 @@ def main():
             shot2 = np.array(gate_sct.grab(grab_bool2), dtype=np.uint8)
             g2_ok = gate2_multi_patches(shot2, bool2_patch_masks)
             gate_on = g1_ok and g2_ok
+            shot7 = np.array(gate_sct.grab(grab_mask7_hide), dtype=np.uint8)
+            mask7_hide_active = gate_white_ratio_masked(
+                shot7,
+                mask7_red_rel_mask,
+                white_min=MASK7_HIDE_WHITE_MIN,
+                required_ratio=MASK7_HIDE_REQUIRED_RATIO,
+            )
+
+            if mask7_hide_active:
+                gate_on = False
 
         if ENABLE_HYSTERESIS:
             true_streak, false_streak = (true_streak + 1, 0) if gate_on else (0, false_streak + 1)
