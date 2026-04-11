@@ -881,7 +881,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     # Discrete external acceleration check.
                     if umbrella_count == 3:
                         if soul_streak_zero_run >= 3:
-                            umbrella_count += 3
+                            umbrella_count += 5
 
                     if umbrella_count >= 11:
                         if soulshade_0_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
