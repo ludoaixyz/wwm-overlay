@@ -91,10 +91,7 @@ ABILITIES = {
         "lockout": 18.0,
         "sound": AUDIO_DIR / "cloud.mp3",
         "pixel_tol": 12,
-        "min_masks_required": 2,
-        "infer_window_frames": 45,
-        "infer_min_distinct_masks": 2,
-        "infer_min_total_hits": 12,
+        "min_masks_required": 1,
         "used_masks": [
             ABILITY_MASKS_DIR / "abilitymaskboolean1a.png",
             ABILITY_MASKS_DIR / "abilitymaskboolean1b.png",
