@@ -5,6 +5,8 @@ import time
 import threading
 import queue
 import ctypes
+import signal
+import sys
 from collections import deque
 from ctypes import wintypes
 from pathlib import Path
@@ -37,6 +39,8 @@ TARGET_EXE = "wwm.exe"
 BYPASS_FOCUS = False
 HIDE_WHEN_UNFOCUSED = False
 DEBUG = True
+CONSOLE_MAX_LINES = 100
+CONSOLE_REDRAW_EVERY = 20
 
 # --- Global Timers & Rates ---
 FRAME_SLEEP = 0.01
@@ -50,6 +54,9 @@ Z_ORDER_PULSE_MS = 250
 WHITE_MIN = 240
 WHITE_REQUIRED_RATIO = 0.70
 BOOL1_PADDING = 2
+MASK7_HIDE_WHITE_MIN = 220
+MASK7_HIDE_REQUIRED_RATIO = 0.80
+MASK7_PADDING = 2
 
 G2_MEDIAN_MIN = 0
 G2_MEDIAN_MAX = 100
@@ -111,10 +118,15 @@ DETECT_ICON_TEMPLATE_PATHS = [
 ]
 BG_ROI_GUIDE_PATH = BUFF_MASKS_DIR / "intoxicatedbg.png"
 INTOX_SOUND_PATH = AUDIO_DIR / "intoxicated.mp3"
+SOULSHADE_15_SOUND_PATH = AUDIO_DIR / "soulshade_15.mp3"
+SOULSHADE_5_SOUND_PATH = AUDIO_DIR / "soulshade_5.mp3"
+SOULSHADE_0_SOUND_PATH = AUDIO_DIR / "soulshade_0.mp3"
 
-INTOX_SOUND_DELAY_SECONDS = 26.3
-INTOX_MIN_GAP_SECONDS = 28.0
-INTOX_OVERLAY_COOLDOWN_SECONDS = 29.0
+INTOX_AUDIO_TRIGGER_TICKS = 28
+INTOX_AUDIO_TRIGGER_PCT = 98.0
+SOULSHADE_AUDIO_TRIGGER_PCT = 98.0
+SOULSHADE_15_AUDIO_TRIGGER_TICKS = 45
+SOULSHADE_5_AUDIO_TRIGGER_TICKS = 56
 INTOX_BUFF_LOST_GRACE_SECONDS = 0.5
 
 # --- Additional Buffs (same ROI as BG_ROI_GUIDE_PATH) ---
@@ -125,8 +137,17 @@ SOULSHADE_TEMPLATE_PATHS = [
     BUFF_MASKS_DIR / "soulshadebuff2b.png",
 ]
 
-STABLE_FRAMES_REQUIRED = 2
 INTOX_CHECK_INTERVAL_SEC = 0.03
+ROI_THRESHOLD_PCT = 97.0
+DEBUG_PRINT_INTERVAL_SEC = 1.0
+BUFF_DETECT_WHEN_UNFOCUSED = True
+
+# Stricter buff sub-ROIs (x0, y0, x1, y1) in normalized template space.
+# These are intentionally configurable so detection can be tuned without rewrites.
+STRICT_BUFF_ROI_FRAC = {
+    "intoxicated": (0.18, 0.18, 0.82, 0.82),
+    "soulshade": (0.18, 0.18, 0.82, 0.82),
+}
 
 TH_CORR, TH_SQDIFF, TH_MAD, TH_EDGE_IOU = 0.82, 0.18, 0.12, 0.45
 TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU = 0.70, 0.30, 0.20, 0.30
@@ -160,6 +181,10 @@ ANIMATED_OVERLAYS = {
     "intoxicated": {"path": GIFS_DIR / "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
+FADE_GIF_KEYS = {"intoxicated", "soulshade"}
+DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
+GIF_FADE_IN_DURATION_SEC = 0.3
+GIF_FADE_OUT_DURATION_SEC = 0.1
 
 
 # ============================================================
@@ -168,15 +193,40 @@ ANIMATED_OVERLAYS = {
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.intox_overlay_block_until = 0.0
-        self.intox_sound_play_at = None
         self.buff_present = {}
         self.buff_last_seen_time = {}
         self.buff_template_present = {}
         self.buff_template_last_seen_time = {}
         self.buff_presence_candidate_streak = {}
+        self.soul_streak = 0
+        self.umbrella_counter = 0
 
 global_state = SharedState()
+
+# ============================================================
+# Console Logging (bounded in-memory output)
+# ============================================================
+_debug_console_buffer = deque(maxlen=CONSOLE_MAX_LINES)
+_debug_console_lock = threading.Lock()
+
+def buffered_console_log(msg: str, *, force_redraw: bool = False):
+    """
+    Keep terminal output bounded to avoid overwhelming console rendering/history.
+    On TTY consoles, redraw only the latest CONSOLE_MAX_LINES periodically.
+    On non-interactive outputs, fallback to normal print.
+    """
+    line = str(msg)
+    with _debug_console_lock:
+        _debug_console_buffer.append(line)
+        is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        should_redraw = force_redraw or (len(_debug_console_buffer) % CONSOLE_REDRAW_EVERY == 0)
+        if is_tty and should_redraw:
+            os.system("cls" if os.name == "nt" else "clear")
+            print("\n".join(_debug_console_buffer), flush=True)
+        elif is_tty:
+            print(line, flush=True)
+        elif not is_tty:
+            print(line, flush=True)
 
 # ============================================================
 # Spacebar hook
@@ -212,7 +262,7 @@ def _space_keyboard_hook_loop(stop_evt: threading.Event):
     class KBDLLHOOKSTRUCT(ctypes.Structure):
         _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD), ("flags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
 
-    hook = wintypes.HANDLE()
+    hook_id = [None]
     LowLevelKeyboardProc = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
     def callback(nCode, wParam, lParam):
@@ -221,25 +271,28 @@ def _space_keyboard_hook_loop(stop_evt: threading.Event):
                 kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if int(kb.vkCode) == int(VK_SPACE):
                     _bump_space_hide(SPACE_FORCE_HIDE_SECONDS)
-        except Exception: pass
-        return user32.CallNextHookEx(hook, nCode, wParam, lParam)
+        except Exception:
+            pass
+        return user32.CallNextHookEx(hook_id[0], nCode, wParam, lParam)
 
-    cb = LowLevelKeyboardProc(callback)
+    pointer_callback = LowLevelKeyboardProc(callback)
     hmod = kernel32.GetModuleHandleW(None)
-    if not hmod: return
-    hook = user32.SetWindowsHookExW(13, cb, hmod, 0)
-    if not hook: return
+    if not hmod:
+        return
+
+    hook_id[0] = user32.SetWindowsHookExW(13, pointer_callback, hmod, 0)
+    if not hook_id[0]:
+        return
 
     msg = wintypes.MSG()
     try:
         while not stop_evt.is_set():
-            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0x0001):
+            while user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 0x0001):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-            time.sleep(0.01)
+            time.sleep(0.005)
     finally:
-        try: user32.UnhookWindowsHookEx(hook)
-        except: pass
+        user32.UnhookWindowsHookEx(hook_id[0])
 
 
 # ============================================================
@@ -359,14 +412,14 @@ def load_template(path):
 def masked_metrics(roi_bgr, tpl_gray, tpl_edges, mask):
     roi_gray = cv2.GaussianBlur(cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY), (3, 3), 0)
     th, tw = tpl_gray.shape[:2]
-    if roi_gray.shape[0] < th or roi_gray.shape[1] < tw: return False, 0.0, 1.0, 1.0, 0.0
+    if roi_gray.shape[0] < th or roi_gray.shape[1] < tw: return False, 0.0, 1.0, 1.0, 0.0, None
 
     _, corr_max, _, loc_corr = cv2.minMaxLoc(cv2.matchTemplate(roi_gray, tpl_gray, cv2.TM_CCORR_NORMED, mask=mask))
     sq_min, _, _, _ = cv2.minMaxLoc(cv2.matchTemplate(roi_gray, tpl_gray, cv2.TM_SQDIFF_NORMED, mask=mask))
     
     x, y = loc_corr
     patch = roi_gray[y:y + th, x:x + tw]
-    if patch.shape[:2] != (th, tw): return False, float(corr_max), float(sq_min), 1.0, 0.0
+    if patch.shape[:2] != (th, tw): return False, float(corr_max), float(sq_min), 1.0, 0.0, None
 
     mad = float((np.abs(patch.astype(np.float32) / 255.0 - tpl_gray.astype(np.float32) / 255.0) * (mask.astype(np.float32) / 255.0)).sum() / (float((mask.astype(np.float32) / 255.0).sum()) + 1e-6))
     patch_edges = cv2.bitwise_and(cv2.Canny(patch, 60, 180), cv2.Canny(patch, 60, 180), mask=mask)
@@ -375,7 +428,51 @@ def masked_metrics(roi_bgr, tpl_gray, tpl_edges, mask):
     edge_iou = float(np.logical_and(pe, te).sum()) / (float(np.logical_or(pe, te).sum()) + 1e-6)
     
     ok = (corr_max >= TH_CORR) and (sq_min <= TH_SQDIFF) and (mad <= TH_MAD) and (edge_iou >= TH_EDGE_IOU)
-    return ok, float(corr_max), float(sq_min), mad, edge_iou
+    return ok, float(corr_max), float(sq_min), mad, edge_iou, patch
+
+
+def _build_strict_submask(mask: np.ndarray, roi_frac):
+    h, w = mask.shape[:2]
+    x0 = int(round(w * float(roi_frac[0])))
+    y0 = int(round(h * float(roi_frac[1])))
+    x1 = int(round(w * float(roi_frac[2])))
+    y1 = int(round(h * float(roi_frac[3])))
+    x0, y0 = max(0, min(w - 1, x0)), max(0, min(h - 1, y0))
+    x1, y1 = max(x0 + 1, min(w, x1)), max(y0 + 1, min(h, y1))
+
+    strict_mask = np.zeros_like(mask)
+    strict_mask[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+    if int((strict_mask > 0).sum()) < MIN_MASK_PIXELS:
+        return mask
+    return strict_mask
+
+
+def _roi_match_pct(patch_gray: np.ndarray, tpl_gray: np.ndarray, strict_mask: np.ndarray) -> float:
+    if patch_gray is None:
+        return 0.0
+    sm = (strict_mask.astype(np.float32) / 255.0)
+    den = float(sm.sum())
+    if den <= 1e-6:
+        return 0.0
+    mad = float((np.abs(patch_gray.astype(np.float32) / 255.0 - tpl_gray.astype(np.float32) / 255.0) * sm).sum() / den)
+    pct = max(0.0, min(100.0, (1.0 - mad) * 100.0))
+    return pct
+
+
+def compute_buff_roi_match_pct(roi_bgr: np.ndarray, templates: list, strict_roi_frac):
+    best_pct = 0.0
+    best_metrics = None
+    for tpl_gray, tpl_edges, tpl_mask in templates:
+        ok, corr, sq, mad, eiou, patch = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
+        strict_mask = _build_strict_submask(tpl_mask, strict_roi_frac)
+        roi_pct = _roi_match_pct(patch, tpl_gray, strict_mask)
+        if best_metrics is None or roi_pct > best_pct:
+            best_pct = roi_pct
+            best_metrics = (ok, corr, sq, mad, eiou, roi_pct)
+    if best_metrics is None:
+        best_metrics = (False, 0.0, 1.0, 1.0, 0.0, 0.0)
+    return best_pct, best_metrics
+
 
 # ============================================================
 # Core Detector Classes (Cooldowns)
@@ -497,7 +594,11 @@ class UnifiedOverlayController:
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.icon_params = icon_params
-        self.q = queue.Queue()
+        self.q = queue.Queue(maxsize=256)
+        self._command_lock = threading.Lock()
+        self._last_icons_visible = None
+        self._last_force_hide = None
+        self._last_gif_state = {}
         
         self.visible_icons = False
         self.force_hide = False
@@ -518,8 +619,13 @@ class UnifiedOverlayController:
                     "x": int(config["x"]),
                     "y": int(config["y"]),
                     "opacity": float(config["opacity"]),
-                    "active": False
+                    "active": key in DEFAULT_ACTIVE_GIF_KEYS,
+                    "target_active": key in DEFAULT_ACTIVE_GIF_KEYS,
+                    "alpha": 0.0,
+                    "fade_enabled": key in FADE_GIF_KEYS,
                 }
+                if key in DEFAULT_ACTIVE_GIF_KEYS:
+                    movie.start()
 
         class _Overlay(QtWidgets.QWidget):
             def __init__(self, outer):
@@ -541,6 +647,7 @@ class UnifiedOverlayController:
 
             def _tick(self):
                 changed = False
+                dt = 0.016
                 while not self.outer.q.empty():
                     cmd = self.outer.q.get_nowait()
                     op = cmd[0]
@@ -552,14 +659,37 @@ class UnifiedOverlayController:
                         _, key, active = cmd
                         if key in self.outer.gif_cache:
                             item = self.outer.gif_cache[key]
-                            if active and not item["active"]:
-                                item["movie"].start()
-                                item["active"] = True
+                            if item["fade_enabled"]:
+                                item["target_active"] = bool(active)
+                                if item["target_active"] and not item["active"]:
+                                    item["movie"].start()
+                                    item["active"] = True
                                 changed = True
-                            elif not active and item["active"]:
-                                item["movie"].stop()
-                                item["active"] = False
-                                changed = True
+                            else:
+                                if active and not item["active"]:
+                                    item["movie"].start()
+                                    item["active"] = True
+                                    changed = True
+                                elif not active and item["active"]:
+                                    item["movie"].stop()
+                                    item["active"] = False
+                                    changed = True
+
+                fade_in_step = 1.0 if GIF_FADE_IN_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_IN_DURATION_SEC)
+                fade_out_step = 1.0 if GIF_FADE_OUT_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_OUT_DURATION_SEC)
+                for item in self.outer.gif_cache.values():
+                    if not item["fade_enabled"]:
+                        continue
+                    prev_alpha = item["alpha"]
+                    if item["target_active"]:
+                        item["alpha"] = min(1.0, item["alpha"] + fade_in_step)
+                    else:
+                        item["alpha"] = max(0.0, item["alpha"] - fade_out_step)
+                        if item["active"] and item["alpha"] <= 0.0:
+                            item["movie"].stop()
+                            item["active"] = False
+                    if item["alpha"] != prev_alpha:
+                        changed = True
 
                 if changed: self.update()
 
@@ -583,7 +713,8 @@ class UnifiedOverlayController:
                         pix = item["movie"].currentPixmap()
                         if not pix.isNull():
                             p.save()
-                            p.setOpacity(item["opacity"])
+                            draw_alpha = item["alpha"] if item["fade_enabled"] else 1.0
+                            p.setOpacity(item["opacity"] * draw_alpha)
                             p.drawPixmap(item["x"], item["y"], pix)
                             p.restore()
                 p.end()
@@ -598,9 +729,36 @@ class UnifiedOverlayController:
             self._z_timer.timeout.connect(lambda: self._raise_topmost(self._hwnd) if not self.force_hide and self.visible_icons else None)
             self._z_timer.start(int(Z_ORDER_PULSE_MS))
 
-    def post_set_icons_visible(self, v: bool): self.q.put(("set_icons_visible", bool(v)))
-    def post_set_force_hide(self, v: bool): self.q.put(("set_force_hide", bool(v)))
-    def post_set_gif_state(self, key: str, active: bool): self.q.put(("set_gif_state", key, active))
+    def _enqueue_cmd(self, cmd):
+        try:
+            self.q.put_nowait(cmd)
+        except queue.Full:
+            # Drop commands under burst load; state dedupe below keeps behavior stable.
+            pass
+
+    def post_set_icons_visible(self, v: bool):
+        v = bool(v)
+        with self._command_lock:
+            if self._last_icons_visible == v:
+                return
+            self._last_icons_visible = v
+        self._enqueue_cmd(("set_icons_visible", v))
+
+    def post_set_force_hide(self, v: bool):
+        v = bool(v)
+        with self._command_lock:
+            if self._last_force_hide == v:
+                return
+            self._last_force_hide = v
+        self._enqueue_cmd(("set_force_hide", v))
+
+    def post_set_gif_state(self, key: str, active: bool):
+        active = bool(active)
+        with self._command_lock:
+            if self._last_gif_state.get(key) == active:
+                return
+            self._last_gif_state[key] = active
+        self._enqueue_cmd(("set_gif_state", key, active))
 
     def update_icon_frame(self, idx: int, qimg): self.icon_params[idx]["_qimg"] = qimg
     def request_repaint(self): self.window.update()
@@ -649,6 +807,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
     for cfg in ABILITIES.values():
         sound_path = str(cfg["sound"])
         cfg["sound_obj"] = pygame.mixer.Sound(sound_path) if os.path.exists(sound_path) else None
+    soulshade_0_sound = pygame.mixer.Sound(str(SOULSHADE_0_SOUND_PATH)) if SOULSHADE_0_SOUND_PATH.exists() else None
 
     detectors = {
         k: MultiMaskDetector(
@@ -666,6 +825,10 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
     with mss() as sct:
         mon = sct.monitors[1]
         for det in detectors.values(): det.prepare(int(mon["width"]), int(mon["height"]))
+        umbrella_count = 0
+        umbrella_count_active = False
+        last_umbrella_counted_epoch = None
+        soul_streak_zero_run = 0
 
         while not stop_evt.is_set():
             now = time.time()
@@ -681,7 +844,9 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         st["cooldown_end"] = now + float(cfg["cooldown"])
                         detectors[key].reset()
                         overlay.post_set_gif_state(key, active=False)
-                
+                        if key == "umbrella":
+                            umbrella_count_active = True
+
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
                     detectors[key].reset()
@@ -691,55 +856,107 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                     if ENABLE_READY_OVERLAY: 
                         overlay.post_set_gif_state(key, active=True)
 
+            umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
+            cloud_on_cooldown = state["cloud"]["cooldown_end"] is not None
+            umbrella_count_should_run = umbrella_on_cooldown or cloud_on_cooldown
+
+            if not umbrella_count_should_run:
+                umbrella_count = 0
+                umbrella_count_active = False
+                last_umbrella_counted_epoch = None
+                soul_streak_zero_run = 0
+                with global_state.lock:
+                    global_state.umbrella_counter = 0
+            else:
+                umbrella_count_active = True
+
+            if umbrella_count_active and umbrella_count_should_run:
+                current_epoch_sec = int(now)
+                if last_umbrella_counted_epoch != current_epoch_sec:
+                    umbrella_count += 1
+                    last_umbrella_counted_epoch = current_epoch_sec
+                    with global_state.lock:
+                        soul_streak = int(global_state.soul_streak)
+                    soul_streak_zero_run = (soul_streak_zero_run + 1) if soul_streak == 0 else 0
+                    if soul_streak != 0:
+                        umbrella_count = max(0, umbrella_count - 2)
+
+                    # Discrete external acceleration check.
+                    if umbrella_count == 3:
+                        if soul_streak_zero_run >= 3:
+                            umbrella_count += 5
+
+                    if umbrella_count >= 11:
+                        if soulshade_0_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                            soulshade_0_sound.play()
+                        umbrella_count = 0
+                    with global_state.lock:
+                        global_state.umbrella_counter = int(umbrella_count)
+
             time.sleep(SAMPLE_INTERVAL)
 
 
-def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, intox_sound):
+def buff_detector_loop(
+    stop_evt: threading.Event,
+    roi_monitor,
+    tpl_cache: dict,
+    intox_sound,
+    soulshade_15_sound,
+    soulshade_5_sound,
+):
     """
     Detect buff icons inside the shared ROI and update global_state.buff_present.
 
-    Intoxicated retains strict activation behavior:
-      - strict-threshold activation
-      - delayed sound playback
-      - temporary overlay blocking
-
-    Soulshade is presence/absence only and does not schedule activation events.
+    Intoxicated audio plays after 26 consecutive 1-second epoch ticks where intox ROI is >= 99%.
+    Soulshade audio:
+      - soulshade_15.mp3 after 45 consecutive 1-second ticks with soul ROI >= 98%
+      - soulshade_5.mp3 after 55 consecutive 1-second ticks with soul ROI >= 98%
     """
-    last_activation_time = 0.0
-    stable_hits = 0
+    intox_audio_streak = 0
+    intox_audio_armed = True
+    soulshade_audio_streak = 0
+    soulshade_15_audio_armed = True
+    soulshade_5_audio_armed = True
+    last_debug_print_at = 0.0
+    last_intox_counted_epoch = None
+    last_soulshade_counted_epoch = None
 
     with mss() as sct:
         while not stop_evt.is_set():
             now = time.time()
 
-            if (foreground_process_name() or "").lower() != TARGET_EXE.lower() and not BYPASS_FOCUS:
-                stable_hits = 0
-                time.sleep(0.05)
-                continue
-
             shot = np.array(sct.grab(roi_monitor), dtype=np.uint8)
             roi_bgr = shot[:, :, :3]
 
-            intox_ok = False
+            buff_eval = {}
+            for buff_key, cfg in BUFF_DEFS.items():
+                strict_roi_frac = STRICT_BUFF_ROI_FRAC.get(buff_key, (0.0, 0.0, 1.0, 1.0))
+                roi_pct, best_metrics = compute_buff_roi_match_pct(roi_bgr, tpl_cache[buff_key], strict_roi_frac)
+                ok, corr, sq, mad, eiou, _ = best_metrics
+                pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
+                soft_match_any = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
+                buff_eval[buff_key] = {
+                    "roi_pct": roi_pct,
+                    "strict_match": bool(ok),
+                    "soft_match": bool(soft_match_any),
+            }
+
+            intox_pct = float(buff_eval["intoxicated"]["roi_pct"])
+            soul_pct = float(buff_eval["soulshade"]["roi_pct"])
+            intox_strict_ok = intox_pct > ROI_THRESHOLD_PCT
+            soul_strict_ok = soul_pct > ROI_THRESHOLD_PCT
+
+            with global_state.lock:
+                global_state.buff_template_present["intoxicated"] = bool(intox_strict_ok)
+                global_state.buff_template_present["soulshade"] = bool(soul_strict_ok)
+                if intox_strict_ok:
+                    global_state.buff_template_last_seen_time["intoxicated"] = now
+                if soul_strict_ok:
+                    global_state.buff_template_last_seen_time["soulshade"] = now
 
             for buff_key, cfg in BUFF_DEFS.items():
-                template_metrics = []
-                soft_match_any = False
-                for tpl_idx, (tpl_gray, tpl_edges, tpl_mask) in enumerate(tpl_cache[buff_key]):
-                    ok, corr, sq, mad, eiou = masked_metrics(roi_bgr, tpl_gray, tpl_edges, tpl_mask)
-                    template_metrics.append((ok, corr, sq, mad, eiou))
-                    template_key = (buff_key, tpl_idx)
-                    pres_corr, pres_sq, pres_mad, pres_eiou = cfg["presence_thresholds"]
-                    template_ok = (corr >= pres_corr) and (sq <= pres_sq) and (mad <= pres_mad) and (eiou >= pres_eiou)
-                    soft_match_any = soft_match_any or template_ok
-                    with global_state.lock:
-                        if template_ok:
-                            global_state.buff_template_last_seen_time[template_key] = now
-                        tpl_last_seen = float(global_state.buff_template_last_seen_time.get(template_key, 0.0))
-                        tpl_present = (now - tpl_last_seen) <= float(cfg["lost_grace"])
-                        global_state.buff_template_present[template_key] = tpl_present
-
-                strict_match_any = any(ok for ok, _, _, _, _ in template_metrics)
+                strict_match_any = buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT
+                soft_match_any = buff_eval[buff_key]["soft_match"]
                 with global_state.lock:
                     streak = int(global_state.buff_presence_candidate_streak.get(buff_key, 0))
                     if strict_match_any:
@@ -754,29 +971,62 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
                     if presence_ok or strict_match_any:
                         global_state.buff_last_seen_time[buff_key] = now
                     last_seen = float(global_state.buff_last_seen_time.get(buff_key, 0.0))
-                    global_state.buff_present[buff_key] = (now - last_seen) <= float(cfg["lost_grace"])
+                    # Hard ROI gate: a buff can only be present when current strict ROI eligibility passes.
+                    global_state.buff_present[buff_key] = bool(strict_match_any and ((now - last_seen) <= float(cfg["lost_grace"])))
 
-                if buff_key == "intoxicated":
-                    intox_ok = strict_match_any
-
-            stable_hits = stable_hits + 1 if intox_ok else 0
-            if stable_hits >= STABLE_FRAMES_REQUIRED and (now - last_activation_time) >= INTOX_MIN_GAP_SECONDS:
-                last_activation_time = now
-                stable_hits = 0
+            if DEBUG and (now - last_debug_print_at) >= DEBUG_PRINT_INTERVAL_SEC:
+                intox_pass = intox_pct > ROI_THRESHOLD_PCT
+                soul_pass = soul_pct > ROI_THRESHOLD_PCT
                 with global_state.lock:
-                    global_state.intox_sound_play_at = now + INTOX_SOUND_DELAY_SECONDS
-                    global_state.intox_overlay_block_until = max(
-                        global_state.intox_overlay_block_until,
-                        now + INTOX_OVERLAY_COOLDOWN_SECONDS,
-                    )
+                    umbrella_counter = int(global_state.umbrella_counter)
+                buffered_console_log(
+                    f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
+                    f"intox_ok={intox_pass} soul_ok={soul_pass} "
+                    f"intox_streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
+                    f"soul_streak={soulshade_audio_streak}/{SOULSHADE_5_AUDIO_TRIGGER_TICKS} "
+                    f"umbrella_counter={umbrella_counter}"
+                )
+                last_debug_print_at = now
 
-            with global_state.lock:
-                play_at = global_state.intox_sound_play_at
-            if play_at and now >= play_at:
+            # 1-second epoch ticker:
+            # Count at most once per UNIX epoch second, regardless of detector polling rate.
+            current_epoch_sec = int(now)
+            if intox_pct >= INTOX_AUDIO_TRIGGER_PCT:
+                if last_intox_counted_epoch != current_epoch_sec:
+                    intox_audio_streak += 1
+                    last_intox_counted_epoch = current_epoch_sec
+            else:
+                intox_audio_streak = 0
+                intox_audio_armed = True
+                last_intox_counted_epoch = None
+
+            if intox_audio_armed and intox_audio_streak >= INTOX_AUDIO_TRIGGER_TICKS:
                 if (foreground_process_name() or "").lower() == TARGET_EXE.lower():
                     intox_sound.play()
-                    with global_state.lock:
-                        global_state.intox_sound_play_at = None
+                intox_audio_armed = False
+
+            if soul_pct >= SOULSHADE_AUDIO_TRIGGER_PCT:
+                if last_soulshade_counted_epoch != current_epoch_sec:
+                    soulshade_audio_streak += 1
+                    last_soulshade_counted_epoch = current_epoch_sec
+            else:
+                soulshade_audio_streak = 0
+                soulshade_15_audio_armed = True
+                soulshade_5_audio_armed = True
+                last_soulshade_counted_epoch = None
+
+            with global_state.lock:
+                global_state.soul_streak = int(soulshade_audio_streak)
+
+            if soulshade_15_audio_armed and soulshade_audio_streak >= SOULSHADE_15_AUDIO_TRIGGER_TICKS:
+                if soulshade_15_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                    soulshade_15_sound.play()
+                soulshade_15_audio_armed = False
+
+            if soulshade_5_audio_armed and soulshade_audio_streak >= SOULSHADE_5_AUDIO_TRIGGER_TICKS:
+                if soulshade_5_sound and (foreground_process_name() or "").lower() == TARGET_EXE.lower():
+                    soulshade_5_sound.play()
+                soulshade_5_audio_armed = False
 
             time.sleep(INTOX_CHECK_INTERVAL_SEC)
 
@@ -786,29 +1036,55 @@ def buff_detector_loop(stop_evt: threading.Event, roi_monitor, tpl_cache: dict, 
 # ============================================================
 def main():
     set_dpi_awareness()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     try: pygame.mixer.init(); pygame.mixer.set_num_channels(8)
     except: pass
 
     # Initialize Base Icon Params
+    preferred_icon_masks = {3: "mask3a2.png", 6: "mask6a.png"}
     a_masks_by_idx = {}
     for a in ICON_MASKS_DIR.glob("mask*a*.png"):
-        m = re.match(r"mask(\d+)a(\d*)\.png$", a.name.lower())
-        if not m:
+        a_name = a.name.lower()
+        match = re.match(r"mask(\d+)a(\d*)\.png$", a_name)
+        if not match:
             continue
-        idx = int(m.group(1))
-        variant = int(m.group(2) or "0")
-        a_masks_by_idx.setdefault(idx, []).append((variant, a))
+        idx = int(match.group(1))
+        variant = int(match.group(2) or "0")
+        a_masks_by_idx.setdefault(idx, []).append((variant, a_name, a))
+
+    # mask7.png is a gate-only probe and should never be rendered as a visible icon.
+    hidden_gate_mask_indices = {7}
+    single_masks_by_idx = {}
+    for single in ICON_MASKS_DIR.glob("mask*.png"):
+        single_name = single.name.lower()
+        match = re.match(r"mask(\d+)\.png$", single_name)
+        if not match:
+            continue
+        idx = int(match.group(1))
+        if idx in hidden_gate_mask_indices:
+            continue
+        single_masks_by_idx[idx] = single
 
     pairs = []
     for idx, candidates in a_masks_by_idx.items():
         b_mask = ICON_MASKS_DIR / f"mask{idx}b.png"
         if not b_mask.exists():
             continue
-        # Prefer numbered variants (ex: mask3a2.png) over base masks (ex: mask3a.png).
-        # This allows wwm_gvg.py to explicitly use mask3a2 + mask3b while still
-        # supporting standard pairs like mask6a + mask6b.
-        best_a = max(candidates, key=lambda item: item[0])[1]
+
+        preferred_name = preferred_icon_masks.get(idx)
+        preferred = next((item for item in candidates if item[1] == preferred_name), None)
+        if preferred is not None:
+            best_a = preferred[2]
+        else:
+            best_a = max(candidates, key=lambda item: item[0])[2]
+
         pairs.append((best_a, b_mask, idx))
+
+    for idx, single_mask in single_masks_by_idx.items():
+        if idx in a_masks_by_idx:
+            continue
+        pairs.append((single_mask, single_mask, idx))
+
     pairs.sort(key=lambda t: t[2])
 
     icon_params = []
@@ -821,8 +1097,10 @@ def main():
     # Initialize Global Gates
     maskBool1 = Image.open(GATE_MASKS_DIR / "maskboolean.png").convert("RGBA")
     maskBool2 = Image.open(GATE_MASKS_DIR / "maskboolean2.png").convert("RGBA")
+    mask7_hide = Image.open(ICON_MASKS_DIR / "mask7.png").convert("RGBA")
     grab_bool1, bool1_red_rel_mask = build_masked_sampler(maskBool1, padding=BOOL1_PADDING)
     grab_bool2, bool2_patch_masks = build_multi_patch_sampler(maskBool2, padding=BOOL2_PADDING)
+    grab_mask7_hide, mask7_red_rel_mask = build_masked_sampler(mask7_hide, padding=MASK7_PADDING)
 
     # Initialize Buff Logic (shared ROI)
     x0, y0, x1, y1 = find_red_roi_from_bg(str(BG_ROI_GUIDE_PATH))
@@ -833,19 +1111,26 @@ def main():
         tpl_cache[buff_key] = [load_template(str(template_path)) for template_path in cfg["templates"]]
 
     intox_sound = pygame.mixer.Sound(str(INTOX_SOUND_PATH))
+    soulshade_15_sound = pygame.mixer.Sound(str(SOULSHADE_15_SOUND_PATH)) if SOULSHADE_15_SOUND_PATH.exists() else None
+    soulshade_5_sound = pygame.mixer.Sound(str(SOULSHADE_5_SOUND_PATH)) if SOULSHADE_5_SOUND_PATH.exists() else None
 
     # Setup UI Controller
     with mss() as sct: sw, sh = int(sct.monitors[1]["width"]), int(sct.monitors[1]["height"])
     from PySide6 import QtWidgets
     app = QtWidgets.QApplication([])
     overlay = UnifiedOverlayController(sw, sh, icon_params)
+    gate_sct = mss()
 
     # Launch Threads
     stop_evt = threading.Event()
     threading.Thread(target=_space_keyboard_hook_loop, args=(stop_evt,), daemon=True).start()
     threading.Thread(target=icon_capture_loop, args=(overlay, stop_evt), daemon=True).start()
     threading.Thread(target=cooldown_detector_loop, args=(overlay, stop_evt), daemon=True).start()
-    threading.Thread(target=buff_detector_loop, args=(stop_evt, roi_monitor, tpl_cache, intox_sound), daemon=True).start()
+    threading.Thread(
+        target=buff_detector_loop,
+        args=(stop_evt, roi_monitor, tpl_cache, intox_sound, soulshade_15_sound, soulshade_5_sound),
+        daemon=True,
+    ).start()
 
     true_streak, false_streak, force_hide_until, was_focused = 0, 0, 0.0, False
 
@@ -868,8 +1153,6 @@ def main():
             was_focused = focus_ok
             overlay.post_set_force_hide(True)
             overlay.post_set_icons_visible(False)
-            for _gif_key in list(overlay.gif_cache.keys()):
-                overlay.post_set_gif_state(_gif_key, active=False)
             true_streak = false_streak = 0
             return
 
@@ -878,12 +1161,21 @@ def main():
         # 2. Gate Checking (Only check ONCE for the whole application)
         if BYPASS_GATES: gate_on = True
         else:
-            with mss() as sct_local:
-                shot1 = np.array(sct_local.grab(grab_bool1), dtype=np.uint8)
-                g1_ok = (float((shot1[:, :, [2, 1, 0]].astype(np.uint8).min(axis=2)[bool1_red_rel_mask] >= WHITE_MIN).mean()) >= WHITE_REQUIRED_RATIO)
-                shot2 = np.array(sct_local.grab(grab_bool2), dtype=np.uint8)
-                g2_ok = gate2_multi_patches(shot2, bool2_patch_masks)
+            shot1 = np.array(gate_sct.grab(grab_bool1), dtype=np.uint8)
+            g1_ok = (float((shot1[:, :, [2, 1, 0]].astype(np.uint8).min(axis=2)[bool1_red_rel_mask] >= WHITE_MIN).mean()) >= WHITE_REQUIRED_RATIO)
+            shot2 = np.array(gate_sct.grab(grab_bool2), dtype=np.uint8)
+            g2_ok = gate2_multi_patches(shot2, bool2_patch_masks)
             gate_on = g1_ok and g2_ok
+            shot7 = np.array(gate_sct.grab(grab_mask7_hide), dtype=np.uint8)
+            mask7_hide_active = gate_white_ratio_masked(
+                shot7,
+                mask7_red_rel_mask,
+                white_min=MASK7_HIDE_WHITE_MIN,
+                required_ratio=MASK7_HIDE_REQUIRED_RATIO,
+            )
+
+            if mask7_hide_active:
+                gate_on = False
 
         if ENABLE_HYSTERESIS:
             true_streak, false_streak = (true_streak + 1, 0) if gate_on else (0, false_streak + 1)
@@ -902,21 +1194,44 @@ def main():
         # 3. Apply Buff-driven Overlay Logic
         with global_state.lock:
             intoxicated_present = bool(global_state.buff_present.get("intoxicated", False))
+            intoxicated_template_present = bool(global_state.buff_template_present.get("intoxicated", False))
             soulshade_present = bool(global_state.buff_present.get("soulshade", False))
-            block_until = float(global_state.intox_overlay_block_until)
+            soulshade_template_present = bool(global_state.buff_template_present.get("soulshade", False))
 
-        should_show_drunk = gate_on and (not intoxicated_present) and (now >= block_until)
+        # Match soulshade robustness: hide intoxicated fire whenever the intoxicated
+        # template itself is confidently present, even if buff_present is currently false.
+        # Intoxicated now follows soulshade-style presence checks only (no hard timer block).
+        should_show_drunk = gate_on and (not intoxicated_present) and (not intoxicated_template_present)
         overlay.post_set_gif_state("intoxicated", active=should_show_drunk)
 
-        should_show_soulshade = gate_on and (not soulshade_present)
+        # Hide soulshade fire whenever the soulshade template itself is confidently present,
+        # even in ambiguous winner states where buff_present may remain false.
+        should_show_soulshade = gate_on and (not soulshade_present) and (not soulshade_template_present)
         overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
 
     timer = overlay.QtCore.QTimer()
     timer.timeout.connect(master_tick)
     timer.start(int(max(5, FRAME_SLEEP * 1000)))
 
-    try: app.exec()
-    finally: stop_evt.set()
+    try:
+        app.exec()
+    except KeyboardInterrupt:
+        print("Interrupt received, shutting down...")
+    finally:
+        stop_evt.set()
+        print("\nShutting down threads...", flush=True)
+        time.sleep(0.1)
+        try:
+            gate_sct.close()
+        except Exception:
+            pass
+        try:
+            pygame.mixer.quit()
+        except Exception:
+            pass
+        app.quit()
+        sys.stdout.flush()
+        os._exit(0)
 
 if __name__ == "__main__":
     main()
