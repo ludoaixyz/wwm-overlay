@@ -97,6 +97,34 @@ ABILITIES = {
             ABILITY_MASKS_DIR / "abilitymaskboolean1b.png",
             ABILITY_MASKS_DIR / "abilitymaskboolean1c.png",
         ],
+        # Post-trigger false-positive remedy.
+        # If any remedy set's masks all pass >= remedy_match_threshold for
+        # remedy_confirm_frames consecutive ticks within remedy_window_sec,
+        # the cooldown is silently cancelled and the cloud GIF is reinstated
+        # without playing cloud.mp3.
+        "remedy_window_sec": 5.0,
+        "remedy_confirm_frames": 2,
+        "remedy_match_threshold": 0.90,
+        "remedy_black_threshold": 16,
+        # After any remedy set fires, every OTHER set in the same ability is
+        # blocked from firing for this many seconds (mutual lockout).
+        "remedy_cross_block_sec": 0.5,
+        "remedies": [
+            {  # Cloud_Remedy_A
+                "label": "A",
+                "masks": [
+                    {"path": ABILITY_MASKS_DIR / "Cloud_Remedy_Check1.png", "tolerance": 35},
+                    {"path": ABILITY_MASKS_DIR / "Cloud_Remedy_Check2.png", "tolerance": 15},
+                ],
+            },
+            {  # Cloud_Remedy_B
+                "label": "B",
+                "masks": [
+                    {"path": ABILITY_MASKS_DIR / "Cloud_Remedy_Check3.png", "tolerance": 35},
+                    {"path": ABILITY_MASKS_DIR / "Cloud_Remedy_Check4.png", "tolerance": 15},
+                ],
+            },
+        ],
     },
     "umbrella": {
         "cooldown": 29.3,
@@ -509,6 +537,70 @@ class PixelMask:
             if not (rmin <= r <= rmax and gmin <= g <= gmax and bmin <= b <= bmax): return False
         return True
 
+class RemedyMask:
+    """
+    Ratio-based mask used for post-trigger false-positive remediation.
+
+    The PNG is authored at native screen resolution. Non-black pixels define
+    the "signal" region (everything else is ignored as transparent). On each
+    check we grab the screen at the tight signal bounding box, then compute
+    the fraction of signal pixels whose per-channel BGR difference from the
+    authored mask falls within `tolerance`. Match ratio >= threshold means
+    this individual mask passes; the remedy fires only when every mask in a
+    set passes for the required number of consecutive ticks.
+    """
+
+    def __init__(self, mask_path: str, tolerance: int = 25, black_threshold: int = 16):
+        self.mask_path = mask_path
+        self.tolerance = int(tolerance)
+        self.black_threshold = int(black_threshold)
+
+        img = cv2.imread(mask_path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise FileNotFoundError(f"Cannot load remedy mask: {mask_path}")
+        self.mask_h, self.mask_w = img.shape[:2]
+
+        is_signal = img.astype(np.int16).max(axis=2) > self.black_threshold
+        ys, xs = np.where(is_signal)
+        if ys.size == 0:
+            raise ValueError(f"Remedy mask has no signal pixels: {mask_path}")
+
+        x0, y0 = int(xs.min()), int(ys.min())
+        x1, y1 = int(xs.max() + 1), int(ys.max() + 1)
+        self.mask_bbox = (x0, y0, x1, y1)
+        self.crop_h, self.crop_w = (y1 - y0), (x1 - x0)
+        self.expected_bgr = img[y0:y1, x0:x1].copy()
+        self.signal_mask = is_signal[y0:y1, x0:x1].copy()
+        self.total_signal = int(self.signal_mask.sum())
+        self.screen_bbox = (0, 0, 0, 0)
+
+    def prepare_for_screen(self, screen_w: int, screen_h: int):
+        sx = float(screen_w) / float(self.mask_w)
+        sy = float(screen_h) / float(self.mask_h)
+        x0, y0, x1, y1 = self.mask_bbox
+        sb_x0 = max(0, int(round(x0 * sx)))
+        sb_y0 = max(0, int(round(y0 * sy)))
+        sb_x1 = min(int(screen_w), int(round(x1 * sx)))
+        sb_y1 = min(int(screen_h), int(round(y1 * sy)))
+        if sb_x1 <= sb_x0 or sb_y1 <= sb_y0:
+            self.screen_bbox = (0, 0, 0, 0)
+        else:
+            self.screen_bbox = (sb_x0, sb_y0, sb_x1, sb_y1)
+
+    def match_ratio(self, screen_bgr: np.ndarray) -> float:
+        if self.total_signal <= 0 or screen_bgr is None or screen_bgr.size == 0:
+            return 0.0
+        if screen_bgr.shape[:2] != (self.crop_h, self.crop_w):
+            screen_bgr = cv2.resize(screen_bgr, (self.crop_w, self.crop_h), interpolation=cv2.INTER_LINEAR)
+        diff = np.abs(screen_bgr.astype(np.int16) - self.expected_bgr.astype(np.int16))
+        within_tol = (
+            (diff[:, :, 0] <= self.tolerance)
+            & (diff[:, :, 1] <= self.tolerance)
+            & (diff[:, :, 2] <= self.tolerance)
+        )
+        matched = int(np.logical_and(within_tol, self.signal_mask).sum())
+        return float(matched) / float(self.total_signal)
+
 class MultiMaskDetector:
     def __init__(
         self,
@@ -770,6 +862,17 @@ class UnifiedOverlayController:
             self._last_gif_state[key] = active
         self._enqueue_cmd(("set_gif_state", key, active))
 
+    def is_gif_active(self, key: str) -> bool:
+        """Return the most recently commanded active state for `key`.
+
+        Falls back to the initial active set if no command has been issued yet,
+        so callers see the correct rendered state even at startup.
+        """
+        with self._command_lock:
+            if key in self._last_gif_state:
+                return bool(self._last_gif_state[key])
+        return key in DEFAULT_ACTIVE_GIF_KEYS
+
     def update_icon_frame(self, idx: int, qimg): self.icon_params[idx]["_qimg"] = qimg
     def request_repaint(self): self.window.update()
 
@@ -830,11 +933,58 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
         )
         for k, cfg in ABILITIES.items()
     }
-    state = {k: {"cooldown_end": None, "last_trigger_time": 0.0} for k in ABILITIES.keys()}
+    state = {
+        k: {
+            "cooldown_end": None,
+            "last_trigger_time": 0.0,
+            "remedy_until": 0.0,
+            "remedy_streaks": [],
+            # Per-set timestamps of the most recent successful remedy fire.
+            # Used for mutual cross-set lockout (see remedy_cross_block_sec).
+            "remedy_last_fire_at": {},
+        }
+        for k in ABILITIES.keys()
+    }
 
     with mss() as sct:
         mon = sct.monitors[1]
         for det in detectors.values(): det.prepare(int(mon["width"]), int(mon["height"]))
+
+        # Build per-ability remedy specs: {ability_key: [[RemedyMask, ...], ...]}.
+        # Missing files are reported but don't abort the loop — ability simply has no remedy.
+        remedy_specs = {}
+        for k, cfg in ABILITIES.items():
+            rspecs = cfg.get("remedies") or []
+            if not rspecs:
+                continue
+            sets_for_key = []
+            for rs in rspecs:
+                masks_in_set = []
+                ok = True
+                for m in rs.get("masks", []):
+                    path_str = str(m["path"])
+                    if not os.path.exists(path_str):
+                        buffered_console_log(f"[REMEDY WARN] missing mask file: {path_str}")
+                        ok = False
+                        break
+                    try:
+                        rm = RemedyMask(
+                            path_str,
+                            tolerance=int(m.get("tolerance", 25)),
+                            black_threshold=int(cfg.get("remedy_black_threshold", 16)),
+                        )
+                        rm.prepare_for_screen(int(mon["width"]), int(mon["height"]))
+                    except Exception as e:
+                        buffered_console_log(f"[REMEDY WARN] failed to load {path_str}: {e}")
+                        ok = False
+                        break
+                    masks_in_set.append(rm)
+                if ok and masks_in_set:
+                    sets_for_key.append({"label": rs.get("label", ""), "masks": masks_in_set})
+            if sets_for_key:
+                remedy_specs[k] = sets_for_key
+                state[k]["remedy_streaks"] = [0] * len(sets_for_key)
+
         umbrella_count = 0
         umbrella_count_active = False
         last_umbrella_counted_epoch = None
@@ -848,15 +998,24 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
 
             for key, cfg in ABILITIES.items():
                 st = state[key]
+                triggered_this_tick = False
                 if st["cooldown_end"] is None and (now - st["last_trigger_time"]) >= float(cfg["lockout"]):
                     if detectors[key].step(sct):
                         st["last_trigger_time"] = now
                         st["cooldown_end"] = now + float(cfg["cooldown"])
                         detectors[key].reset()
                         overlay.post_set_gif_state(key, active=False)
+                        triggered_this_tick = True
                         if key == "umbrella":
                             overlay.post_set_gif_state("umbrella_cooldown", active=True)
                             umbrella_count_active = True
+                        if key in remedy_specs:
+                            st["remedy_until"] = now + float(cfg.get("remedy_window_sec", 5.0))
+                            st["remedy_streaks"] = [0] * len(remedy_specs[key])
+                            if DEBUG:
+                                buffered_console_log(
+                                    f"[REMEDY] {key} armed for {float(cfg.get('remedy_window_sec', 5.0)):.1f}s"
+                                )
 
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
@@ -868,6 +1027,75 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         overlay.post_set_gif_state(key, active=True)
                     if key == "umbrella":
                         overlay.post_set_gif_state("umbrella_cooldown", active=False)
+
+                # Post-trigger false-positive remedy.
+                # Skip on the trigger tick itself (the trigger state is still on screen);
+                # then continuously evaluate each remedy set until the window expires.
+                # Hard veto: if the ability's own GIF is currently shown as ready,
+                # something already restored it (e.g. natural cooldown end, prior
+                # remedy fire); never re-apply a remedy on top of a "ready" state.
+                if (
+                    not triggered_this_tick
+                    and key in remedy_specs
+                    and st["cooldown_end"] is not None
+                    and now < float(st.get("remedy_until", 0.0))
+                    and not overlay.is_gif_active(key)
+                ):
+                    threshold = float(cfg.get("remedy_match_threshold", 0.90))
+                    confirm_frames = int(cfg.get("remedy_confirm_frames", 2))
+                    cross_block_sec = float(cfg.get("remedy_cross_block_sec", 0.5))
+                    last_fires = st["remedy_last_fire_at"]
+                    triggered_set_idx = -1
+                    for set_idx, rset in enumerate(remedy_specs[key]):
+                        # Mutual lockout: if any OTHER set fired within the
+                        # cross-block window, skip this set entirely and reset
+                        # its streak so it can't escape the block by accumulating.
+                        blocked_by_other = False
+                        for other_idx in range(len(remedy_specs[key])):
+                            if other_idx == set_idx:
+                                continue
+                            other_last = float(last_fires.get(other_idx, 0.0))
+                            if other_last > 0.0 and (now - other_last) < cross_block_sec:
+                                blocked_by_other = True
+                                break
+                        if blocked_by_other:
+                            st["remedy_streaks"][set_idx] = 0
+                            continue
+
+                        all_pass = True
+                        for rm in rset["masks"]:
+                            sx0, sy0, sx1, sy1 = rm.screen_bbox
+                            if sx1 <= sx0 or sy1 <= sy0:
+                                all_pass = False
+                                break
+                            roi = np.array(
+                                sct.grab({"left": sx0, "top": sy0, "width": sx1 - sx0, "height": sy1 - sy0}),
+                                dtype=np.uint8,
+                            )[:, :, :3]
+                            if rm.match_ratio(roi) < threshold:
+                                all_pass = False
+                                break
+                        if all_pass:
+                            st["remedy_streaks"][set_idx] += 1
+                            if st["remedy_streaks"][set_idx] >= confirm_frames:
+                                triggered_set_idx = set_idx
+                                break
+                        else:
+                            st["remedy_streaks"][set_idx] = 0
+
+                    if triggered_set_idx >= 0:
+                        st["remedy_last_fire_at"][triggered_set_idx] = now
+                        st["cooldown_end"] = None
+                        st["last_trigger_time"] = 0.0
+                        st["remedy_until"] = 0.0
+                        st["remedy_streaks"] = [0] * len(remedy_specs[key])
+                        detectors[key].reset()
+                        overlay.post_set_gif_state(key, active=True)
+                        if key == "umbrella":
+                            overlay.post_set_gif_state("umbrella_cooldown", active=False)
+                        if DEBUG:
+                            label = remedy_specs[key][triggered_set_idx].get("label") or str(triggered_set_idx)
+                            buffered_console_log(f"[REMEDY] {key} cooldown cancelled by set {label}")
 
             umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
             cloud_on_cooldown = state["cloud"]["cooldown_end"] is not None
