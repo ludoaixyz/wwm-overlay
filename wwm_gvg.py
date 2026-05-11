@@ -102,7 +102,7 @@ ABILITIES = {
         ],
     },
     "umbrella": {
-        "cooldown": 28.9,
+        "cooldown": 29.4,
         "lockout": 28.0,
         "sound": AUDIO_DIR / "umbrella.mp3",
         "used_masks": [ABILITY_MASKS_DIR / "abilitymaskboolean2a.png"],
@@ -178,10 +178,12 @@ OVERLAY_ALPHA_SCALE = 1.0
 ANIMATED_OVERLAYS = {
     "cloud": {"path": GIFS_DIR / "abilitymaskbooleanCloud.gif", "x": 1590 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "umbrella": {"path": GIFS_DIR / "abilitymaskbooleanUmbrella.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "umbrella_cooldown": {"path": GIFS_DIR / "abilitymaskbooleanUmbrella2.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "intoxicated": {"path": GIFS_DIR / "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
-FADE_GIF_KEYS = {"intoxicated", "soulshade"}
+FADE_IN_GIF_KEYS = {"intoxicated", "soulshade", "umbrella_cooldown"}
+FADE_OUT_GIF_KEYS = {"intoxicated", "soulshade"}
 DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
 GIF_FADE_IN_DURATION_SEC = 0.3
 GIF_FADE_OUT_DURATION_SEC = 0.1
@@ -622,7 +624,8 @@ class UnifiedOverlayController:
                     "active": key in DEFAULT_ACTIVE_GIF_KEYS,
                     "target_active": key in DEFAULT_ACTIVE_GIF_KEYS,
                     "alpha": 0.0,
-                    "fade_enabled": key in FADE_GIF_KEYS,
+                    "fade_in_enabled": key in FADE_IN_GIF_KEYS,
+                    "fade_out_enabled": key in FADE_OUT_GIF_KEYS,
                 }
                 if key in DEFAULT_ACTIVE_GIF_KEYS:
                     movie.start()
@@ -659,11 +662,15 @@ class UnifiedOverlayController:
                         _, key, active = cmd
                         if key in self.outer.gif_cache:
                             item = self.outer.gif_cache[key]
-                            if item["fade_enabled"]:
+                            if item["fade_in_enabled"] or item["fade_out_enabled"]:
                                 item["target_active"] = bool(active)
                                 if item["target_active"] and not item["active"]:
                                     item["movie"].start()
                                     item["active"] = True
+                                if not item["target_active"] and not item["fade_out_enabled"]:
+                                    item["movie"].stop()
+                                    item["active"] = False
+                                    item["alpha"] = 0.0
                                 changed = True
                             else:
                                 if active and not item["active"]:
@@ -678,16 +685,22 @@ class UnifiedOverlayController:
                 fade_in_step = 1.0 if GIF_FADE_IN_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_IN_DURATION_SEC)
                 fade_out_step = 1.0 if GIF_FADE_OUT_DURATION_SEC <= 0 else min(1.0, dt / GIF_FADE_OUT_DURATION_SEC)
                 for item in self.outer.gif_cache.values():
-                    if not item["fade_enabled"]:
+                    if not (item["fade_in_enabled"] or item["fade_out_enabled"]):
                         continue
                     prev_alpha = item["alpha"]
                     if item["target_active"]:
-                        item["alpha"] = min(1.0, item["alpha"] + fade_in_step)
+                        if item["fade_in_enabled"]:
+                            item["alpha"] = min(1.0, item["alpha"] + fade_in_step)
+                        else:
+                            item["alpha"] = 1.0
                     else:
-                        item["alpha"] = max(0.0, item["alpha"] - fade_out_step)
-                        if item["active"] and item["alpha"] <= 0.0:
-                            item["movie"].stop()
-                            item["active"] = False
+                        if item["fade_out_enabled"]:
+                            item["alpha"] = max(0.0, item["alpha"] - fade_out_step)
+                            if item["active"] and item["alpha"] <= 0.0:
+                                item["movie"].stop()
+                                item["active"] = False
+                        else:
+                            item["alpha"] = 0.0
                     if item["alpha"] != prev_alpha:
                         changed = True
 
@@ -713,7 +726,7 @@ class UnifiedOverlayController:
                         pix = item["movie"].currentPixmap()
                         if not pix.isNull():
                             p.save()
-                            draw_alpha = item["alpha"] if item["fade_enabled"] else 1.0
+                            draw_alpha = item["alpha"] if (item["fade_in_enabled"] or item["fade_out_enabled"]) else 1.0
                             p.setOpacity(item["opacity"] * draw_alpha)
                             p.drawPixmap(item["x"], item["y"], pix)
                             p.restore()
@@ -845,6 +858,7 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         detectors[key].reset()
                         overlay.post_set_gif_state(key, active=False)
                         if key == "umbrella":
+                            overlay.post_set_gif_state("umbrella_cooldown", active=True)
                             umbrella_count_active = True
 
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
@@ -855,6 +869,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                         except: pass
                     if ENABLE_READY_OVERLAY: 
                         overlay.post_set_gif_state(key, active=True)
+                    if key == "umbrella":
+                        overlay.post_set_gif_state("umbrella_cooldown", active=False)
 
             umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
             cloud_on_cooldown = state["cloud"]["cooldown_end"] is not None
