@@ -102,7 +102,7 @@ ABILITIES = {
         ],
     },
     "umbrella": {
-        "cooldown": 28.9,
+        "cooldown": 29.3,
         "lockout": 28.0,
         "sound": AUDIO_DIR / "umbrella.mp3",
         "used_masks": [ABILITY_MASKS_DIR / "abilitymaskboolean2a.png"],
