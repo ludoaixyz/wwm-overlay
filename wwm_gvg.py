@@ -78,6 +78,9 @@ DEBUG_PRINT_EVERY_SEC = 1.0
 MASK_PIXEL_TOL = 8
 MASK_CONFIRM_FRAMES = 2
 
+# When False: no cloud GIF in the overlay, no cloud mask cooldown/sound.
+ENABLE_CLOUD_GIF_CHECK = False
+
 MASK_COLOR_RANGES = {
     "abilitymaskboolean1a.png": ((180, 180, 150), (255, 255, 255)),
     "abilitymaskboolean1b.png": ((200, 200, 200), (255, 255, 255)),
@@ -184,7 +187,7 @@ ANIMATED_OVERLAYS = {
 }
 FADE_IN_GIF_KEYS = {"intoxicated", "soulshade", "umbrella_cooldown"}
 FADE_OUT_GIF_KEYS = {"intoxicated", "soulshade"}
-DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
+DEFAULT_ACTIVE_GIF_KEYS = {"umbrella"} if not ENABLE_CLOUD_GIF_CHECK else {"cloud", "umbrella"}
 GIF_FADE_IN_DURATION_SEC = 0.3
 GIF_FADE_OUT_DURATION_SEC = 0.1
 
@@ -612,6 +615,8 @@ class UnifiedOverlayController:
 
         # Initialize all animated GIFs (Cooldowns + Intoxicated)
         for key, config in ANIMATED_OVERLAYS.items():
+            if key == "cloud" and not ENABLE_CLOUD_GIF_CHECK:
+                continue
             path = str(config["path"])
             if os.path.exists(path):
                 movie = QtGui.QMovie(path)
@@ -851,6 +856,11 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
 
             for key, cfg in ABILITIES.items():
                 st = state[key]
+                if key == "cloud" and not ENABLE_CLOUD_GIF_CHECK:
+                    st["cooldown_end"] = None
+                    st["last_trigger_time"] = 0.0
+                    detectors[key].reset()
+                    continue
                 if st["cooldown_end"] is None and (now - st["last_trigger_time"]) >= float(cfg["lockout"]):
                     if detectors[key].step(sct):
                         st["last_trigger_time"] = now

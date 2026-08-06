@@ -78,6 +78,9 @@ DEBUG_PRINT_EVERY_SEC = 1.0
 MASK_PIXEL_TOL = 8
 MASK_CONFIRM_FRAMES = 2
 
+# When False: no cloud GIF in the overlay, no cloud mask cooldown/remedy/sound.
+ENABLE_CLOUD_GIF_CHECK = False
+
 MASK_COLOR_RANGES = {
     "abilitymaskboolean1a.png": ((180, 180, 150), (255, 255, 255)),
     "abilitymaskboolean1b.png": ((200, 200, 200), (255, 255, 255)),
@@ -104,11 +107,13 @@ ABILITIES = {
         # without playing cloud.mp3.
         "remedy_window_sec": 5.0,
         "remedy_confirm_frames": 2,
-        "remedy_match_threshold": 0.90,
+        "remedy_match_threshold": 0.98,
         "remedy_black_threshold": 16,
-        # After any remedy set fires, every OTHER set in the same ability is
-        # blocked from firing for this many seconds (mutual lockout).
-        "remedy_cross_block_sec": 0.5,
+        # After any remedy set fires, every set in this ability (including the
+        # one that just fired) is blocked from firing again for this many
+        # seconds. Mirrors the front-end "lockout" so a single false-positive
+        # can't cascade into repeated remedy fires.
+        "remedy_lockout_sec": 18.0,
         "remedies": [
             {  # Cloud_Remedy_A
                 "label": "A",
@@ -209,7 +214,7 @@ ANIMATED_OVERLAYS = {
 }
 FADE_IN_GIF_KEYS = {"intoxicated", "soulshade", "umbrella_cooldown"}
 FADE_OUT_GIF_KEYS = {"intoxicated", "soulshade"}
-DEFAULT_ACTIVE_GIF_KEYS = {"cloud", "umbrella"}
+DEFAULT_ACTIVE_GIF_KEYS = {"umbrella"} if not ENABLE_CLOUD_GIF_CHECK else {"cloud", "umbrella"}
 GIF_FADE_IN_DURATION_SEC = 0.3
 GIF_FADE_OUT_DURATION_SEC = 0.1
 
@@ -701,6 +706,8 @@ class UnifiedOverlayController:
 
         # Initialize all animated GIFs (Cooldowns + Intoxicated)
         for key, config in ANIMATED_OVERLAYS.items():
+            if key == "cloud" and not ENABLE_CLOUD_GIF_CHECK:
+                continue
             path = str(config["path"])
             if os.path.exists(path):
                 movie = QtGui.QMovie(path)
@@ -939,9 +946,10 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
             "last_trigger_time": 0.0,
             "remedy_until": 0.0,
             "remedy_streaks": [],
-            # Per-set timestamps of the most recent successful remedy fire.
-            # Used for mutual cross-set lockout (see remedy_cross_block_sec).
-            "remedy_last_fire_at": {},
+            # Timestamp after which any remedy set in this ability may fire
+            # again. Set to (now + remedy_lockout_sec) whenever a remedy fires
+            # so neither set can "double-dip" within the lockout window.
+            "remedy_lockout_until": 0.0,
         }
         for k in ABILITIES.keys()
     }
@@ -954,6 +962,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
         # Missing files are reported but don't abort the loop — ability simply has no remedy.
         remedy_specs = {}
         for k, cfg in ABILITIES.items():
+            if k == "cloud" and not ENABLE_CLOUD_GIF_CHECK:
+                continue
             rspecs = cfg.get("remedies") or []
             if not rspecs:
                 continue
@@ -998,8 +1008,30 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
 
             for key, cfg in ABILITIES.items():
                 st = state[key]
+                if key == "cloud" and not ENABLE_CLOUD_GIF_CHECK:
+                    st["cooldown_end"] = None
+                    st["last_trigger_time"] = 0.0
+                    st["remedy_until"] = 0.0
+                    st["remedy_lockout_until"] = 0.0
+                    st["remedy_streaks"] = []
+                    detectors[key].reset()
+                    continue
+
                 triggered_this_tick = False
-                if st["cooldown_end"] is None and (now - st["last_trigger_time"]) >= float(cfg["lockout"]):
+                # Front-end trigger is also blocked during the remedy lockout.
+                # Otherwise, the same false-positive scene that just produced a
+                # remedy fire would immediately re-trigger and re-hide the GIF
+                # that the remedy just reinstated. Resetting the detector here
+                # ensures stale streak/inference state doesn't carry across
+                # the lockout boundary.
+                remedy_lockout_active = now < float(st.get("remedy_lockout_until", 0.0))
+                if remedy_lockout_active:
+                    detectors[key].reset()
+                if (
+                    not remedy_lockout_active
+                    and st["cooldown_end"] is None
+                    and (now - st["last_trigger_time"]) >= float(cfg["lockout"])
+                ):
                     if detectors[key].step(sct):
                         st["last_trigger_time"] = now
                         st["cooldown_end"] = now + float(cfg["cooldown"])
@@ -1013,9 +1045,17 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                             st["remedy_until"] = now + float(cfg.get("remedy_window_sec", 5.0))
                             st["remedy_streaks"] = [0] * len(remedy_specs[key])
                             if DEBUG:
-                                buffered_console_log(
-                                    f"[REMEDY] {key} armed for {float(cfg.get('remedy_window_sec', 5.0)):.1f}s"
-                                )
+                                window_sec = float(cfg.get("remedy_window_sec", 5.0))
+                                lockout_remaining = float(st.get("remedy_lockout_until", 0.0)) - now
+                                if lockout_remaining > 0.0:
+                                    buffered_console_log(
+                                        f"[REMEDY] {key} armed for {window_sec:.1f}s "
+                                        f"(suppressed: lockout active for {lockout_remaining:.1f}s more)"
+                                    )
+                                else:
+                                    buffered_console_log(
+                                        f"[REMEDY] {key} armed for {window_sec:.1f}s"
+                                    )
 
                 elif st["cooldown_end"] is not None and now >= st["cooldown_end"]:
                     st["cooldown_end"] = None
@@ -1031,37 +1071,24 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                 # Post-trigger false-positive remedy.
                 # Skip on the trigger tick itself (the trigger state is still on screen);
                 # then continuously evaluate each remedy set until the window expires.
-                # Hard veto: if the ability's own GIF is currently shown as ready,
-                # something already restored it (e.g. natural cooldown end, prior
-                # remedy fire); never re-apply a remedy on top of a "ready" state.
+                # Hard vetoes:
+                #   - If the ability's own GIF is currently shown as ready,
+                #     something already restored it (e.g. natural cooldown end,
+                #     prior remedy fire); never re-apply on top of a "ready" state.
+                #   - If a previous remedy fire's lockout window is still active,
+                #     no set in this ability may fire (no double-dipping).
                 if (
                     not triggered_this_tick
                     and key in remedy_specs
                     and st["cooldown_end"] is not None
                     and now < float(st.get("remedy_until", 0.0))
                     and not overlay.is_gif_active(key)
+                    and now >= float(st.get("remedy_lockout_until", 0.0))
                 ):
                     threshold = float(cfg.get("remedy_match_threshold", 0.90))
                     confirm_frames = int(cfg.get("remedy_confirm_frames", 2))
-                    cross_block_sec = float(cfg.get("remedy_cross_block_sec", 0.5))
-                    last_fires = st["remedy_last_fire_at"]
                     triggered_set_idx = -1
                     for set_idx, rset in enumerate(remedy_specs[key]):
-                        # Mutual lockout: if any OTHER set fired within the
-                        # cross-block window, skip this set entirely and reset
-                        # its streak so it can't escape the block by accumulating.
-                        blocked_by_other = False
-                        for other_idx in range(len(remedy_specs[key])):
-                            if other_idx == set_idx:
-                                continue
-                            other_last = float(last_fires.get(other_idx, 0.0))
-                            if other_last > 0.0 and (now - other_last) < cross_block_sec:
-                                blocked_by_other = True
-                                break
-                        if blocked_by_other:
-                            st["remedy_streaks"][set_idx] = 0
-                            continue
-
                         all_pass = True
                         for rm in rset["masks"]:
                             sx0, sy0, sx1, sy1 = rm.screen_bbox
@@ -1084,7 +1111,8 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                             st["remedy_streaks"][set_idx] = 0
 
                     if triggered_set_idx >= 0:
-                        st["remedy_last_fire_at"][triggered_set_idx] = now
+                        remedy_lockout = float(cfg.get("remedy_lockout_sec", cfg.get("lockout", 0.0)))
+                        st["remedy_lockout_until"] = now + remedy_lockout
                         st["cooldown_end"] = None
                         st["last_trigger_time"] = 0.0
                         st["remedy_until"] = 0.0
@@ -1095,7 +1123,10 @@ def cooldown_detector_loop(overlay: UnifiedOverlayController, stop_evt: threadin
                             overlay.post_set_gif_state("umbrella_cooldown", active=False)
                         if DEBUG:
                             label = remedy_specs[key][triggered_set_idx].get("label") or str(triggered_set_idx)
-                            buffered_console_log(f"[REMEDY] {key} cooldown cancelled by set {label}")
+                            buffered_console_log(
+                                f"[REMEDY] {key} cooldown cancelled by set {label}; "
+                                f"all remedies locked for {remedy_lockout:.1f}s"
+                            )
 
             umbrella_on_cooldown = state["umbrella"]["cooldown_end"] is not None
             cloud_on_cooldown = state["cloud"]["cooldown_end"] is not None
