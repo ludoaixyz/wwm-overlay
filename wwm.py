@@ -166,6 +166,12 @@ SOULSHADE_TEMPLATE_PATHS = [
     BUFF_MASKS_DIR / "soulshadebuff2a.png",
     BUFF_MASKS_DIR / "soulshadebuff2b.png",
 ]
+SEASON_TEMPLATE_PATHS = [
+    BUFF_MASKS_DIR / "seasonbuff1a.png",
+    BUFF_MASKS_DIR / "seasonbuff1b.png",
+    BUFF_MASKS_DIR / "seasonbuff2a.png",
+    BUFF_MASKS_DIR / "seasonbuff2b.png",
+]
 
 INTOX_CHECK_INTERVAL_SEC = 0.03
 ROI_THRESHOLD_PCT = 97.0
@@ -177,6 +183,7 @@ BUFF_DETECT_WHEN_UNFOCUSED = True
 STRICT_BUFF_ROI_FRAC = {
     "intoxicated": (0.18, 0.18, 0.82, 0.82),
     "soulshade": (0.18, 0.18, 0.82, 0.82),
+    "season": (0.18, 0.18, 0.82, 0.82),
 }
 
 TH_CORR, TH_SQDIFF, TH_MAD, TH_EDGE_IOU = 0.82, 0.18, 0.12, 0.45
@@ -198,6 +205,13 @@ BUFF_DEFS = {
         "presence_stable_frames": 2,
         "has_activation": False,
     },
+    "season": {
+        "templates": SEASON_TEMPLATE_PATHS,
+        "presence_thresholds": (TH_PRES_CORR, TH_PRES_SQDIFF, TH_PRES_MAD, TH_PRES_EDGE_IOU),
+        "lost_grace": INTOX_BUFF_LOST_GRACE_SECONDS,
+        "presence_stable_frames": 2,
+        "has_activation": False,
+    },
 }
 
 # --- Unified Animated Overlay Elements ---
@@ -211,9 +225,10 @@ ANIMATED_OVERLAYS = {
     "umbrella_cooldown": {"path": GIFS_DIR / "abilitymaskbooleanUmbrella2.gif", "x": 1476 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "intoxicated": {"path": GIFS_DIR / "drunkfire.gif", "x": 1855 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
     "soulshade": {"path": GIFS_DIR / "soulshadefire.gif", "x": 1969 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
+    "season": {"path": GIFS_DIR / "seasonfire.gif", "x": 2083 - 50, "y": 568 - 50, "w": 100, "h": 100, "opacity": 1.0},
 }
-FADE_IN_GIF_KEYS = {"intoxicated", "soulshade", "umbrella_cooldown"}
-FADE_OUT_GIF_KEYS = {"intoxicated", "soulshade"}
+FADE_IN_GIF_KEYS = {"intoxicated", "soulshade", "season", "umbrella_cooldown"}
+FADE_OUT_GIF_KEYS = {"intoxicated", "soulshade", "season"}
 DEFAULT_ACTIVE_GIF_KEYS = {"umbrella"} if not ENABLE_CLOUD_GIF_CHECK else {"cloud", "umbrella"}
 GIF_FADE_IN_DURATION_SEC = 0.3
 GIF_FADE_OUT_DURATION_SEC = 0.1
@@ -1215,16 +1230,21 @@ def buff_detector_loop(
 
             intox_pct = float(buff_eval["intoxicated"]["roi_pct"])
             soul_pct = float(buff_eval["soulshade"]["roi_pct"])
+            season_pct = float(buff_eval["season"]["roi_pct"])
             intox_strict_ok = intox_pct > ROI_THRESHOLD_PCT
             soul_strict_ok = soul_pct > ROI_THRESHOLD_PCT
+            season_strict_ok = season_pct > ROI_THRESHOLD_PCT
 
             with global_state.lock:
                 global_state.buff_template_present["intoxicated"] = bool(intox_strict_ok)
                 global_state.buff_template_present["soulshade"] = bool(soul_strict_ok)
+                global_state.buff_template_present["season"] = bool(season_strict_ok)
                 if intox_strict_ok:
                     global_state.buff_template_last_seen_time["intoxicated"] = now
                 if soul_strict_ok:
                     global_state.buff_template_last_seen_time["soulshade"] = now
+                if season_strict_ok:
+                    global_state.buff_template_last_seen_time["season"] = now
 
             for buff_key, cfg in BUFF_DEFS.items():
                 strict_match_any = buff_eval[buff_key]["roi_pct"] > ROI_THRESHOLD_PCT
@@ -1249,11 +1269,12 @@ def buff_detector_loop(
             if DEBUG and (now - last_debug_print_at) >= DEBUG_PRINT_INTERVAL_SEC:
                 intox_pass = intox_pct > ROI_THRESHOLD_PCT
                 soul_pass = soul_pct > ROI_THRESHOLD_PCT
+                season_pass = season_pct > ROI_THRESHOLD_PCT
                 with global_state.lock:
                     umbrella_counter = int(global_state.umbrella_counter)
                 buffered_console_log(
-                    f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% "
-                    f"intox_ok={intox_pass} soul_ok={soul_pass} "
+                    f"[ROI DEBUG] intox={intox_pct:.1f}% soul={soul_pct:.1f}% season={season_pct:.1f}% "
+                    f"intox_ok={intox_pass} soul_ok={soul_pass} season_ok={season_pass} "
                     f"intox_streak={intox_audio_streak}/{INTOX_AUDIO_TRIGGER_TICKS} "
                     f"soul_streak={soulshade_audio_streak}/{SOULSHADE_5_AUDIO_TRIGGER_TICKS} "
                     f"umbrella_counter={umbrella_counter}"
@@ -1446,6 +1467,8 @@ def main():
             intoxicated_template_present = bool(global_state.buff_template_present.get("intoxicated", False))
             soulshade_present = bool(global_state.buff_present.get("soulshade", False))
             soulshade_template_present = bool(global_state.buff_template_present.get("soulshade", False))
+            season_present = bool(global_state.buff_present.get("season", False))
+            season_template_present = bool(global_state.buff_template_present.get("season", False))
 
         # Match soulshade robustness: hide intoxicated fire whenever the intoxicated
         # template itself is confidently present, even if buff_present is currently false.
@@ -1457,6 +1480,10 @@ def main():
         # even in ambiguous winner states where buff_present may remain false.
         should_show_soulshade = gate_on and (not soulshade_present) and (not soulshade_template_present)
         overlay.post_set_gif_state("soulshade", active=should_show_soulshade)
+
+        # Season mirrors the intoxicated/soulshade readiness behavior.
+        should_show_season = gate_on and (not season_present) and (not season_template_present)
+        overlay.post_set_gif_state("season", active=should_show_season)
 
     timer = overlay.QtCore.QTimer()
     timer.timeout.connect(master_tick)
